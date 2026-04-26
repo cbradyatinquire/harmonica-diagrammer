@@ -5,6 +5,67 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import os
+import threading
+import time
+import numpy as np
+import pygame
+
+# ─── Audio Engine ─────────────────────────────────────────────────────────────
+
+_SAMPLE_RATE = 44100
+pygame.mixer.pre_init(_SAMPLE_RATE, -16, 2, 512)
+pygame.mixer.init()
+
+def _synth_reed(freq, duration):
+    """Synthesize a harmonica reed tone: blend of harmonics with ADSR envelope."""
+    n = int(_SAMPLE_RATE * duration)
+    t = np.linspace(0, duration, n, endpoint=False)
+
+    # Harmonica reed: strong fundamental + rolloff harmonics, slight odd-harmonic bias
+    wave = (
+        1.00 * np.sin(2 * np.pi * 1 * freq * t) +
+        0.55 * np.sin(2 * np.pi * 2 * freq * t) +
+        0.30 * np.sin(2 * np.pi * 3 * freq * t) +
+        0.18 * np.sin(2 * np.pi * 4 * freq * t) +
+        0.12 * np.sin(2 * np.pi * 5 * freq * t) +
+        0.08 * np.sin(2 * np.pi * 6 * freq * t)
+    )
+    peak = np.max(np.abs(wave))
+    if peak > 0:
+        wave /= peak
+
+    # ADSR: 15 ms attack, sustain at 0.75, 80 ms release
+    attack  = min(int(0.015 * _SAMPLE_RATE), n)
+    release = min(int(0.080 * _SAMPLE_RATE), n)
+    env = np.full(n, 0.75)
+    env[:attack]  = np.linspace(0, 1.0, attack)
+    env[-release:] = np.linspace(0.75, 0.0, release)
+
+    samples = (wave * env * 32767).astype(np.int16)
+    return np.column_stack([samples, samples])   # stereo
+
+
+def _midi_to_freq(midi):
+    return 440.0 * (2.0 ** ((midi - 69) / 12.0))
+
+
+def _play_sequence(midi_notes, note_dur, stop_event):
+    """Play MIDI notes sequentially in a background thread."""
+    for midi in midi_notes:
+        if stop_event.is_set():
+            break
+        freq = _midi_to_freq(midi)
+        samples = _synth_reed(freq, note_dur)
+        sound = pygame.sndarray.make_sound(np.ascontiguousarray(samples))
+        sound.play()
+        deadline = time.monotonic() + note_dur
+        while time.monotonic() < deadline:
+            if stop_event.is_set():
+                pygame.mixer.stop()
+                return
+            time.sleep(0.01)
+    pygame.mixer.stop()
+
 
 # ─── Music Theory ──────────────────────────────────────────────────────────────
 
@@ -122,6 +183,9 @@ def _path_offset(hole, row_type):
         return DRAW_OFF[hole]
     if row_type == 'blow':
         return BLOW_OFF[hole]
+    if row_type == 'over':
+        # holes 0-5: overblow = draw+1; holes 6-9: overdraw = blow+1
+        return (DRAW_OFF[hole] + 1) if DRAW_OFF[hole] > BLOW_OFF[hole] else (BLOW_OFF[hole] + 1)
     if isinstance(row_type, tuple):
         kind, level = row_type
         return (DRAW_OFF[hole] if kind == 'draw_bend' else BLOW_OFF[hole]) - (level + 1)
@@ -148,6 +212,13 @@ def _group_path(path):
     return groups
 
 
+def _path_to_midi(path, harp_root):
+    """Return one MIDI note per pitch group in the path (deduplicates fork positions).
+    C harp root = C4 = MIDI 60."""
+    midi_root = 60 + NOTES.index(harp_root)
+    return [midi_root + _path_offset(*group[0]) for group in _group_path(path)]
+
+
 def pentatonic_path(harp_root, pent_set):
     """
     All harp positions that are pentatonic notes, including bend positions,
@@ -158,7 +229,9 @@ def pentatonic_path(harp_root, pent_set):
     blow, draw = harp_notes(harp_root)
     db = draw_bends(harp_root)
     bb = blow_bends(harp_root)
+    ob = over_notes(harp_root)
     positions = []
+    SUPPRESS_OVER = {1, 2, 7}
 
     for i, n in enumerate(blow):
         if n in pent_set:
@@ -174,6 +247,10 @@ def pentatonic_path(harp_root, pent_set):
         for level, n in enumerate(bends):
             if n in pent_set:
                 positions.append((BLOW_OFF[i] - (level + 1), i, ('blow_bend', level)))
+    for i, n in enumerate(ob):
+        if n and n in pent_set and i not in SUPPRESS_OVER:
+            off = _path_offset(i, 'over')
+            positions.append((off, i, 'over'))
 
     positions.sort(key=lambda x: (x[0], x[1]))
     return [(h, r) for (_, h, r) in positions]
@@ -183,14 +260,14 @@ def pentatonic_path(harp_root, pent_set):
 # Geometry
 HOLE_W   = 84       # pixels per hole (column width)
 L_MARGIN = 40       # left and right margin
-CIRCLE_R = 32       # note circle radius
+CIRCLE_R = 28       # note circle radius
 IMG_W    = L_MARGIN * 2 + 10 * HOLE_W   # = 920
 
 TITLE_H      = 56   # title area height
-OVER_H       = 22   # overblow/overdraw label row above draw row
-ROW_H        = CIRCLE_R * 2 + 8         # = 72 (height of a note row)
-DRAW_BEND_H  = 26   # height per draw-bend level (must fit small bend circle)
-BLOW_BEND_H  = 26   # height per blow-bend level
+OVER_H       = 26   # overblow/overdraw label row above draw row
+ROW_H        = CIRCLE_R * 2 + 8         # = 64 (height of a note row)
+DRAW_BEND_H  = 30   # height per draw-bend level (must fit small bend ellipse)
+BLOW_BEND_H  = 30   # height per blow-bend level
 MAX_DRAW_B   = 3    # max draw bends (hole 3 has 3)
 MAX_BLOW_B   = 2    # max blow bends (hole 10 has 2)
 BOT_MARGIN   = 18
@@ -198,10 +275,10 @@ BOT_MARGIN   = 18
 # Ellipse dimensions for non-standard (bent / overblow / overdraw) notes.
 # Wider than tall to suggest these notes require a technique beyond normal blow/draw,
 # matching the Photoshop reference style.
-BEND_RX  = 20   # horizontal radius of draw/blow bend ellipse
-BEND_RY  = 11   # vertical radius  (fits inside DRAW_BEND_H = 26 px)
-OVER_RX  = 16   # horizontal radius of overblow/overdraw ellipse
-OVER_RY  =  8   # vertical radius  (fits inside OVER_H = 22 px)
+BEND_RX  = 24   # horizontal radius of draw/blow bend ellipse
+BEND_RY  = 13   # vertical radius  (fits inside DRAW_BEND_H = 30 px)
+OVER_RX  = 20   # horizontal radius of overblow/overdraw ellipse
+OVER_RY  = 11   # vertical radius  (fits inside OVER_H = 26 px)
 
 IMG_H = (TITLE_H + OVER_H + ROW_H + MAX_DRAW_B * DRAW_BEND_H +
          ROW_H + MAX_BLOW_B * BLOW_BEND_H + BOT_MARGIN)
@@ -223,8 +300,8 @@ def _theme(dark_bg):
                     outline_lw=3)
     else:
         return dict(bg=(255,255,255), title=(0,0,0),
-                    plain=(70,70,70), bend=(100,100,100),
-                    outline_lw=1)   # hairline border on white
+                    plain=(0,0,0), bend=(0,0,0),
+                    outline_lw=2)
 
 # Y-positions
 def _over_y():
@@ -306,6 +383,8 @@ def _pos_xy(hole_idx, row_type):
         y = _draw_cy()
     elif row_type == 'blow':
         y = _blow_cy()
+    elif row_type == 'over':
+        y = _over_y()
     elif isinstance(row_type, tuple) and row_type[0] == 'draw_bend':
         y = _bend_between_y(row_type[1])
     elif isinstance(row_type, tuple) and row_type[0] == 'blow_bend':
@@ -317,14 +396,14 @@ def _pos_xy(hole_idx, row_type):
 
 def _render_bend_note(dc, cx, cy, note, pent_set, green_notes, orange_set,
                       f_tiny, theme, rx=BEND_RX, ry=BEND_RY):
-    """Draw a bend-level note as a wide ellipse (in-scale) or plain text."""
+    """Draw a bend-level note as a wide ellipse (pentatonic) or rounded rect (orange) or plain text."""
     lw = theme['outline_lw']
     if note in pent_set:
         fill = ROOT_C if note in green_notes else PENT_C
-        _draw_ellipse(dc, cx, cy, rx, ry, fill, OUTLINE_C, lw=lw)
+        _draw_ellipse(dc, cx, cy, rx, ry, fill, LINE_C, lw=lw)
         _center_text(dc, cx, cy, note, f_tiny, TEXT_C)
     elif note in orange_set:
-        _draw_ellipse(dc, cx, cy, rx, ry, ORANGE_C, OUTLINE_C, lw=lw)
+        _draw_rounded_rect(dc, cx, cy, rx * 2, ry * 2, ORANGE_C, OUTLINE_C, radius=4, lw=lw)
         _center_text(dc, cx, cy, note, f_tiny, TEXT_C)
     else:
         _center_text(dc, cx, cy, note, f_tiny, theme['bend'])
@@ -363,9 +442,9 @@ def render(scale_key, mode, harp_key, dark_bg=True):
     dc  = ImageDraw.Draw(img)
 
     f_title = _load_font(26, bold=True)
-    f_note  = _load_font(28, bold=True)
+    f_note  = _load_font(24, bold=True)
     f_small = _load_font(14)
-    f_tiny  = _load_font(11, bold=True)
+    f_tiny  = _load_font(14, bold=True)
 
     # Title
     _center_text(dc, IMG_W // 2, TITLE_H // 2,
@@ -393,7 +472,7 @@ def render(scale_key, mode, harp_key, dark_bg=True):
             cx = _hole_x(i)
             if note in pent_set:
                 fill = ROOT_C if note in green_notes else PENT_C
-                _draw_circle(dc, cx, cy, CIRCLE_R, fill, OUTLINE_C, lw=lw)
+                _draw_circle(dc, cx, cy, CIRCLE_R, fill, LINE_C, lw=lw)
                 _center_text(dc, cx, cy, note, f_note, TEXT_C)
             elif note in orange_set:
                 _draw_rounded_rect(dc, cx, cy,
@@ -441,6 +520,9 @@ class App(tk.Tk):
         self.title("Harmonica Pentatonic Editor")
         self.resizable(False, False)
         self.configure(bg='#1e1e1e')
+
+        self._stop_event  = threading.Event()
+        self._play_thread = None
 
         self._build_controls()
         self._build_preview()
@@ -492,9 +574,33 @@ class App(tk.Tk):
                   command=self._export, **btn_style).grid(
             row=6, columnspan=2, sticky='ew', pady=2)
 
+        ttk.Separator(ctrl, orient='horizontal').grid(
+            row=7, columnspan=2, sticky='ew', pady=8)
+
+        # Tempo
+        self.v_tempo = tk.IntVar(value=100)
+        tk.Label(ctrl, text='Tempo (BPM):', **lbl_opts).grid(
+            row=8, column=0, sticky='w', pady=3)
+        tk.Spinbox(ctrl, from_=40, to=240, textvariable=self.v_tempo,
+                   width=5, font=('Arial', 11)).grid(
+            row=8, column=1, sticky='w', padx=(6, 0), pady=3)
+
+        # Play buttons
+        play_frame = tk.Frame(ctrl, bg='#1e1e1e')
+        play_frame.grid(row=9, columnspan=2, sticky='ew', pady=(6, 2))
+        tk.Button(play_frame, text='◀ Play',
+                  command=lambda: self._play(forward=False),
+                  **btn_style).pack(side='left', expand=True, fill='x', padx=(0, 2))
+        tk.Button(play_frame, text='Play ▶',
+                  command=lambda: self._play(forward=True),
+                  **btn_style).pack(side='left', expand=True, fill='x', padx=(2, 0))
+
+        tk.Button(ctrl, text='■ Stop', command=self._stop,
+                  **btn_style).grid(row=10, columnspan=2, sticky='ew', pady=2)
+
         self._info = tk.Label(ctrl, text='', bg='#1e1e1e', fg='#888888',
                               font=('Arial', 9), wraplength=200, justify='left')
-        self._info.grid(row=7, columnspan=2, sticky='w', pady=(8, 0))
+        self._info.grid(row=11, columnspan=2, sticky='w', pady=(8, 0))
 
     # ── Preview canvas ─────────────────────────────────────────────────────────
 
@@ -532,6 +638,46 @@ class App(tk.Tk):
             text=f"Scale: {' '.join(mode_scale(key, mode))}\n"
                  f"Pentatonic: {' '.join(pent)}\n"
                  f"Orange (non-pent): {' '.join(sorted(orange, key=NOTES.index))}")
+
+    # ── Playback ───────────────────────────────────────────────────────────────
+
+    def _play(self, forward=True):
+        # Stop any current playback first
+        self._stop()
+
+        harp_key = self.v_harp.get()
+        key      = self.v_key.get()
+        mode     = self.v_mode.get()
+        _, _, pent = pentatonic_info(key, mode)
+        path = pentatonic_path(harp_key, set(pent))
+        if not path:
+            return
+
+        midi_notes = _path_to_midi(path, harp_key)
+
+        # Trim to first octave: first occurrence of the tonic to the next occurrence
+        # of the same pitch class (12 semitones higher = one true octave).
+        key_class = NOTES.index(key)
+        root_idx = [i for i, m in enumerate(midi_notes) if m % 12 == key_class]
+        if len(root_idx) >= 2:
+            midi_notes = midi_notes[root_idx[0]:root_idx[1] + 1]
+
+        if not forward:
+            midi_notes = list(reversed(midi_notes))
+
+        note_dur = 60.0 / max(self.v_tempo.get(), 1)
+        self._stop_event = threading.Event()
+        self._play_thread = threading.Thread(
+            target=_play_sequence,
+            args=(midi_notes, note_dur, self._stop_event),
+            daemon=True)
+        self._play_thread.start()
+
+    def _stop(self):
+        self._stop_event.set()
+        if self._play_thread and self._play_thread.is_alive():
+            self._play_thread.join(timeout=0.3)
+        pygame.mixer.stop()
 
     # ── Export ─────────────────────────────────────────────────────────────────
 
