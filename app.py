@@ -7,46 +7,23 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import os
 import threading
 import time
-import numpy as np
-import pygame
+import fluidsynth
 
 # ─── Audio Engine ─────────────────────────────────────────────────────────────
 
-_SAMPLE_RATE = 44100
-pygame.mixer.pre_init(_SAMPLE_RATE, -16, 2, 512)
-pygame.mixer.init()
+_SF2 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    'Hohner_Silverstar_Harmonica.sf2')
 
-def _synth_reed(freq, duration):
-    """Synthesize a harmonica reed tone: blend of harmonics with ADSR envelope."""
-    n = int(_SAMPLE_RATE * duration)
-    t = np.linspace(0, duration, n, endpoint=False)
+_fs   = fluidsynth.Synth(gain=0.8)
+_sfid = None
 
-    # Harmonica reed: strong fundamental + rolloff harmonics, slight odd-harmonic bias
-    wave = (
-        1.00 * np.sin(2 * np.pi * 1 * freq * t) +
-        0.55 * np.sin(2 * np.pi * 2 * freq * t) +
-        0.30 * np.sin(2 * np.pi * 3 * freq * t) +
-        0.18 * np.sin(2 * np.pi * 4 * freq * t) +
-        0.12 * np.sin(2 * np.pi * 5 * freq * t) +
-        0.08 * np.sin(2 * np.pi * 6 * freq * t)
-    )
-    peak = np.max(np.abs(wave))
-    if peak > 0:
-        wave /= peak
+def _init_audio():
+    global _sfid
+    _fs.start(driver='coreaudio')
+    _sfid = _fs.sfload(_SF2)
+    _fs.program_select(0, _sfid, 0, 0)
 
-    # ADSR: 15 ms attack, sustain at 0.75, 80 ms release
-    attack  = min(int(0.015 * _SAMPLE_RATE), n)
-    release = min(int(0.080 * _SAMPLE_RATE), n)
-    env = np.full(n, 0.75)
-    env[:attack]  = np.linspace(0, 1.0, attack)
-    env[-release:] = np.linspace(0.75, 0.0, release)
-
-    samples = (wave * env * 32767).astype(np.int16)
-    return np.column_stack([samples, samples])   # stereo
-
-
-def _midi_to_freq(midi):
-    return 440.0 * (2.0 ** ((midi - 69) / 12.0))
+_init_audio()
 
 
 def _play_sequence(midi_notes, note_dur, stop_event):
@@ -54,17 +31,15 @@ def _play_sequence(midi_notes, note_dur, stop_event):
     for midi in midi_notes:
         if stop_event.is_set():
             break
-        freq = _midi_to_freq(midi)
-        samples = _synth_reed(freq, note_dur)
-        sound = pygame.sndarray.make_sound(np.ascontiguousarray(samples))
-        sound.play()
+        _fs.noteon(0, midi, 90)
         deadline = time.monotonic() + note_dur
         while time.monotonic() < deadline:
             if stop_event.is_set():
-                pygame.mixer.stop()
+                _fs.noteoff(0, midi)
                 return
             time.sleep(0.01)
-    pygame.mixer.stop()
+        _fs.noteoff(0, midi)
+        time.sleep(0.03)   # brief gap between notes
 
 
 # ─── Music Theory ──────────────────────────────────────────────────────────────
@@ -419,8 +394,33 @@ def _make_title(scale_key, mode, harp_key):
     return f"{body}   on a   {harp_key} Harp"
 
 
-def render(scale_key, mode, harp_key, dark_bg=True):
-    """Build and return a PIL Image of the pentatonic notation diagram."""
+_SHARP_TO_FLAT = {
+    'C#':'Db','D#':'Eb','E#':'F','F#':'Gb','G#':'Ab','A#':'Bb','B#':'C'
+}
+
+def parse_note_names(text):
+    """Parse space/comma-separated note names; accept sharps, normalise to NOTES list.
+    Raises ValueError with a friendly message on unknown tokens."""
+    tokens = text.replace(',', ' ').split()
+    if not tokens:
+        raise ValueError("no notes entered")
+    result = []
+    for raw in tokens:
+        t = raw[0].upper() + raw[1:].lower() if len(raw) > 1 else raw.upper()
+        t = _SHARP_TO_FLAT.get(t, t)
+        if t not in NOTES:
+            raise ValueError(f"unknown note '{raw}'")
+        result.append(t)
+    return result
+
+
+def render(scale_key, mode, harp_key, dark_bg=True,
+           path_notes=None, custom_title=None):
+    """Build and return a PIL Image of the pentatonic notation diagram.
+
+    path_notes  — if given, a list of note names that override the auto path.
+    custom_title — if given, replaces the auto-generated title string.
+    """
     t = _theme(dark_bg)   # resolve background-dependent colours
 
     _, orange_set, pent_list = pentatonic_info(scale_key, mode)
@@ -436,7 +436,12 @@ def render(scale_key, mode, harp_key, dark_bg=True):
     db = draw_bends(harp_key)
     bb = blow_bends(harp_key)
     ob = over_notes(harp_key)
-    path = pentatonic_path(harp_key, pent_set)
+
+    # Path: custom note list overrides auto-pentatonic path
+    if path_notes is not None:
+        path = pentatonic_path(harp_key, set(path_notes))
+    else:
+        path = pentatonic_path(harp_key, pent_set)
 
     img = Image.new('RGB', (IMG_W, IMG_H), t['bg'])
     dc  = ImageDraw.Draw(img)
@@ -446,9 +451,9 @@ def render(scale_key, mode, harp_key, dark_bg=True):
     f_small = _load_font(14)
     f_tiny  = _load_font(14, bold=True)
 
-    # Title
-    _center_text(dc, IMG_W // 2, TITLE_H // 2,
-                 _make_title(scale_key, mode, harp_key), f_title, t['title'])
+    # Title: custom string or auto-generated
+    title_str = custom_title if custom_title else _make_title(scale_key, mode, harp_key)
+    _center_text(dc, IMG_W // 2, TITLE_H // 2, title_str, f_title, t['title'])
 
     draw_cy = _draw_cy()
     blow_cy = _blow_cy()
@@ -578,7 +583,7 @@ class App(tk.Tk):
             row=7, columnspan=2, sticky='ew', pady=8)
 
         # Tempo
-        self.v_tempo = tk.IntVar(value=100)
+        self.v_tempo = tk.IntVar(value=150)
         tk.Label(ctrl, text='Tempo (BPM):', **lbl_opts).grid(
             row=8, column=0, sticky='w', pady=3)
         tk.Spinbox(ctrl, from_=40, to=240, textvariable=self.v_tempo,
@@ -598,9 +603,43 @@ class App(tk.Tk):
         tk.Button(ctrl, text='■ Stop', command=self._stop,
                   **btn_style).grid(row=10, columnspan=2, sticky='ew', pady=2)
 
+        ttk.Separator(ctrl, orient='horizontal').grid(
+            row=11, columnspan=2, sticky='ew', pady=8)
+
+        # Custom path section
+        self.v_custom       = tk.BooleanVar(value=False)
+        self.v_custom_title = tk.StringVar()
+        self.v_custom_notes = tk.StringVar()
+
+        tk.Checkbutton(
+            ctrl, text='Custom path',
+            variable=self.v_custom,
+            command=self._on_custom_toggle,
+            bg='#1e1e1e', fg='#cccccc', selectcolor='#333333',
+            activebackground='#1e1e1e', activeforeground='#cccccc',
+            font=('Arial', 11)).grid(row=12, columnspan=2, sticky='w', pady=2)
+
+        tk.Label(ctrl, text='Title:', **lbl_opts).grid(
+            row=13, column=0, sticky='w', pady=3)
+        self._ent_title = tk.Entry(
+            ctrl, textvariable=self.v_custom_title,
+            width=16, font=('Arial', 11), state='disabled',
+            disabledforeground='#555555')
+        self._ent_title.grid(row=13, column=1, sticky='ew', padx=(6, 0), pady=3)
+        self.v_custom_title.trace_add('write', lambda *_: self._refresh())
+
+        tk.Label(ctrl, text='Notes:', **lbl_opts).grid(
+            row=14, column=0, sticky='w', pady=3)
+        self._ent_notes = tk.Entry(
+            ctrl, textvariable=self.v_custom_notes,
+            width=16, font=('Arial', 11), state='disabled',
+            disabledforeground='#555555')
+        self._ent_notes.grid(row=14, column=1, sticky='ew', padx=(6, 0), pady=3)
+        self.v_custom_notes.trace_add('write', lambda *_: self._refresh())
+
         self._info = tk.Label(ctrl, text='', bg='#1e1e1e', fg='#888888',
                               font=('Arial', 9), wraplength=200, justify='left')
-        self._info.grid(row=11, columnspan=2, sticky='w', pady=(8, 0))
+        self._info.grid(row=15, columnspan=2, sticky='w', pady=(8, 0))
 
     # ── Preview canvas ─────────────────────────────────────────────────────────
 
@@ -612,6 +651,24 @@ class App(tk.Tk):
         self._canvas.grid(row=0, column=1, padx=(0, 12), pady=12)
         self._tk_img = None
 
+    # ── Custom-path toggle ─────────────────────────────────────────────────────
+
+    def _on_custom_toggle(self):
+        state = 'normal' if self.v_custom.get() else 'disabled'
+        self._ent_title.config(state=state)
+        self._ent_notes.config(state=state)
+        self._refresh()
+
+    def _custom_params(self):
+        """Return (path_notes, custom_title) for the current custom-path state,
+        or (None, None) when custom mode is off.  Raises ValueError on bad notes."""
+        if not self.v_custom.get():
+            return None, None
+        raw_notes = self.v_custom_notes.get().strip()
+        path_notes = parse_note_names(raw_notes) if raw_notes else None
+        custom_title = self.v_custom_title.get().strip() or None
+        return path_notes, custom_title
+
     # ── Refresh ────────────────────────────────────────────────────────────────
 
     def _refresh(self):
@@ -620,7 +677,12 @@ class App(tk.Tk):
         mode     = self.v_mode.get()
 
         try:
-            img = render(key, mode, harp_key, dark_bg=self.v_dark.get())
+            path_notes, custom_title = self._custom_params()
+            img = render(key, mode, harp_key, dark_bg=self.v_dark.get(),
+                         path_notes=path_notes, custom_title=custom_title)
+        except ValueError as e:
+            self._info.config(text=f"Note error: {e}")
+            return
         except Exception as e:
             self._info.config(text=f"Error: {e}")
             return
@@ -633,11 +695,18 @@ class App(tk.Tk):
         self._current_img = img
 
         # Update info label
-        _, orange, pent = pentatonic_info(key, mode)
-        self._info.config(
-            text=f"Scale: {' '.join(mode_scale(key, mode))}\n"
-                 f"Pentatonic: {' '.join(pent)}\n"
-                 f"Orange (non-pent): {' '.join(sorted(orange, key=NOTES.index))}")
+        if self.v_custom.get() and self.v_custom_notes.get().strip():
+            try:
+                notes = parse_note_names(self.v_custom_notes.get())
+                self._info.config(text=f"Custom path: {' '.join(notes)}")
+            except ValueError as e:
+                self._info.config(text=f"Note error: {e}")
+        else:
+            _, orange, pent = pentatonic_info(key, mode)
+            self._info.config(
+                text=f"Scale: {' '.join(mode_scale(key, mode))}\n"
+                     f"Pentatonic: {' '.join(pent)}\n"
+                     f"Orange (non-pent): {' '.join(sorted(orange, key=NOTES.index))}")
 
     # ── Playback ───────────────────────────────────────────────────────────────
 
@@ -648,17 +717,28 @@ class App(tk.Tk):
         harp_key = self.v_harp.get()
         key      = self.v_key.get()
         mode     = self.v_mode.get()
-        _, _, pent = pentatonic_info(key, mode)
-        path = pentatonic_path(harp_key, set(pent))
+
+        try:
+            path_notes, _ = self._custom_params()
+        except ValueError:
+            return
+
+        if path_notes is not None:
+            note_set  = set(path_notes)
+            anchor_class = NOTES.index(path_notes[0])
+        else:
+            _, _, pent = pentatonic_info(key, mode)
+            note_set  = set(pent)
+            anchor_class = NOTES.index(key)
+
+        path = pentatonic_path(harp_key, note_set)
         if not path:
             return
 
         midi_notes = _path_to_midi(path, harp_key)
 
-        # Trim to first octave: first occurrence of the tonic to the next occurrence
-        # of the same pitch class (12 semitones higher = one true octave).
-        key_class = NOTES.index(key)
-        root_idx = [i for i, m in enumerate(midi_notes) if m % 12 == key_class]
+        # Trim to first octave anchored on the tonic (or first custom note).
+        root_idx = [i for i, m in enumerate(midi_notes) if m % 12 == anchor_class]
         if len(root_idx) >= 2:
             midi_notes = midi_notes[root_idx[0]:root_idx[1] + 1]
 
@@ -677,7 +757,7 @@ class App(tk.Tk):
         self._stop_event.set()
         if self._play_thread and self._play_thread.is_alive():
             self._play_thread.join(timeout=0.3)
-        pygame.mixer.stop()
+        _fs.all_notes_off(0)
 
     # ── Export ─────────────────────────────────────────────────────────────────
 
@@ -692,9 +772,13 @@ class App(tk.Tk):
             initialfile=default,
             title='Export diagram')
         if path:
-            # Re-render at full resolution with current settings
+            try:
+                path_notes, custom_title = self._custom_params()
+            except ValueError:
+                path_notes, custom_title = None, None
             img = render(self.v_key.get(), self.v_mode.get(),
-                         self.v_harp.get(), dark_bg=self.v_dark.get())
+                         self.v_harp.get(), dark_bg=self.v_dark.get(),
+                         path_notes=path_notes, custom_title=custom_title)
             img.save(path)
             self._info.config(text=f"Saved: {os.path.basename(path)}")
 
