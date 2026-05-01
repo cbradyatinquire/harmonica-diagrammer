@@ -378,11 +378,11 @@ TEXT_C    = (0,   0,   0  )   # black text inside circles/boxes
 # Theme colours — depend on dark_bg flag (resolved in render())
 def _theme(dark_bg):
     if dark_bg:
-        return dict(bg=(0,0,0), title=(255,255,255),
+        return dict(bg=(0,0,0), title=(238,238,238),
                     plain=(190,190,190), bend=(155,155,155),
                     outline_lw=3)
     else:
-        return dict(bg=(255,255,255), title=(0,0,0),
+        return dict(bg=(255,255,255), title=(18,18,18),
                     plain=(0,0,0), bend=(0,0,0),
                     outline_lw=2)
 
