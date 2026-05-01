@@ -662,7 +662,7 @@ class App(tk.Tk):
         self.v_harp  = tk.StringVar(value='C')
         self.v_key   = tk.StringVar(value='C')
         self.v_mode  = tk.StringVar(value='major')
-        self.v_dark  = tk.BooleanVar(value=True)
+        self.v_dark  = tk.BooleanVar(value=False)
 
         row('Harp key:',    self.v_harp,  NOTES,        0)
         row('Scale key:',   self.v_key,   NOTES,        1)
@@ -752,7 +752,10 @@ class App(tk.Tk):
         self._btn_record = tk.Button(
             rec_frame, text='🎤 Record', command=self._toggle_record,
             **btn_style)
-        self._btn_record.pack(side='left', expand=True, fill='x', padx=(0, 4))
+        self._btn_record.pack(side='left', expand=True, fill='x', padx=(0, 2))
+        tk.Button(rec_frame, text='✕ Clear',
+                  command=lambda: self.v_custom_notes.set(''),
+                  **btn_style).pack(side='left', expand=True, fill='x', padx=(2, 4))
         self._lbl_hearing = tk.Label(
             rec_frame, text='', bg='#1e1e1e', fg='#ffaa00',
             font=('Arial', 13, 'bold'), width=3)
