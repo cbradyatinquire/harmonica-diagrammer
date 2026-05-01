@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import os
+import sys
 import threading
 import time
 import queue
@@ -15,8 +16,12 @@ import fluidsynth
 
 # ─── Audio Engine ─────────────────────────────────────────────────────────────
 
-_SF2 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                    'Hohner_Silverstar_Harmonica.sf2')
+def _resource(filename):
+    """Locate a bundled resource — works both in dev and PyInstaller .app."""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, filename)
+
+_SF2 = _resource('Hohner_Silverstar_Harmonica.sf2')
 
 _fs   = fluidsynth.Synth(gain=0.8)
 _sfid = None

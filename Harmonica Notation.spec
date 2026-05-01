@@ -5,7 +5,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('Hohner_Silverstar_Harmonica.sf2', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
