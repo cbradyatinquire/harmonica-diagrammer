@@ -8,6 +8,7 @@ import os
 import threading
 import time
 import queue
+import subprocess
 import numpy as np
 import sounddevice as sd
 import fluidsynth
@@ -378,11 +379,11 @@ TEXT_C    = (0,   0,   0  )   # black text inside circles/boxes
 # Theme colours — depend on dark_bg flag (resolved in render())
 def _theme(dark_bg):
     if dark_bg:
-        return dict(bg=(0,0,0), title=(238,238,238),
+        return dict(bg=(0,0,0), title=(0,0,0), title_bg=(238,238,238),
                     plain=(190,190,190), bend=(155,155,155),
                     outline_lw=3)
     else:
-        return dict(bg=(255,255,255), title=(18,18,18),
+        return dict(bg=(255,255,255), title=(255,255,255), title_bg=(18,18,18),
                     plain=(0,0,0), bend=(0,0,0),
                     outline_lw=2)
 
@@ -560,6 +561,7 @@ def render(scale_key, mode, harp_key, dark_bg=True,
 
     # Title: custom string or auto-generated
     title_str = custom_title if custom_title else _make_title(scale_key, mode, harp_key)
+    dc.rectangle([0, 0, IMG_W, TITLE_H - 5], fill=t['title_bg'])
     _center_text(dc, IMG_W // 2, TITLE_H // 2, title_str, f_title, t['title'])
 
     draw_cy = _draw_cy()
@@ -621,6 +623,21 @@ def render(scale_key, mode, harp_key, dark_bg=True,
                               orange_set, f_tiny, t)
 
     return img
+
+def _copy_to_clipboard(img):
+    """Copy a PIL Image to the macOS clipboard as PNG via osascript."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix='.png')
+    os.close(fd)
+    try:
+        img.save(tmp, 'PNG')
+        subprocess.run(
+            ['osascript', '-e',
+             f'set the clipboard to (read (POSIX file "{tmp}") as «class PNGf»)'],
+            check=True)
+    finally:
+        os.unlink(tmp)
+
 
 # ─── GUI ──────────────────────────────────────────────────────────────────────
 
@@ -684,9 +701,14 @@ class App(tk.Tk):
             row=5, columnspan=2, sticky='ew', pady=8)
 
         btn_style = dict(font=('Arial', 11), padx=8, pady=4)
-        tk.Button(ctrl, text='Export PNG…',
-                  command=self._export, **btn_style).grid(
-            row=6, columnspan=2, sticky='ew', pady=2)
+        export_frame = tk.Frame(ctrl, bg='#1e1e1e')
+        export_frame.grid(row=6, columnspan=2, sticky='ew', pady=2)
+        tk.Button(export_frame, text='Export PNG…',
+                  command=self._export, **btn_style).pack(
+            side='left', expand=True, fill='x', padx=(0, 2))
+        tk.Button(export_frame, text='Copy',
+                  command=self._copy, **btn_style).pack(
+            side='left', expand=True, fill='x', padx=(2, 0))
 
         ttk.Separator(ctrl, orient='horizontal').grid(
             row=7, columnspan=2, sticky='ew', pady=8)
@@ -933,6 +955,21 @@ class App(tk.Tk):
 
     # ── Export ─────────────────────────────────────────────────────────────────
 
+    def _current_render(self):
+        """Re-render at full resolution with current settings."""
+        try:
+            path_notes, custom_title = self._custom_params()
+        except ValueError:
+            path_notes, custom_title = None, None
+        return render(self.v_key.get(), self.v_mode.get(),
+                      self.v_harp.get(), dark_bg=self.v_dark.get(),
+                      path_notes=path_notes, custom_title=custom_title)
+
+    def _copy(self):
+        img = self._current_render()
+        _copy_to_clipboard(img)
+        self._info.config(text='Copied to clipboard.')
+
     def _export(self):
         harp = self.v_harp.get()
         key  = self.v_key.get()
@@ -944,15 +981,10 @@ class App(tk.Tk):
             initialfile=default,
             title='Export diagram')
         if path:
-            try:
-                path_notes, custom_title = self._custom_params()
-            except ValueError:
-                path_notes, custom_title = None, None
-            img = render(self.v_key.get(), self.v_mode.get(),
-                         self.v_harp.get(), dark_bg=self.v_dark.get(),
-                         path_notes=path_notes, custom_title=custom_title)
+            img = self._current_render()
             img.save(path)
-            self._info.config(text=f"Saved: {os.path.basename(path)}")
+            _copy_to_clipboard(img)
+            self._info.config(text=f"Saved & copied: {os.path.basename(path)}")
 
 
 if __name__ == '__main__':
