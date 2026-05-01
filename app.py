@@ -749,17 +749,22 @@ class App(tk.Tk):
         # Record-from-mic controls
         rec_frame = tk.Frame(ctrl, bg='#1e1e1e')
         rec_frame.grid(row=15, columnspan=2, sticky='ew', pady=(4, 0))
+        # Column 1 is the expanding spacer; column 3 (Clear) is right-aligned.
+        rec_frame.columnconfigure(1, weight=1, minsize=20)
+
         self._btn_record = tk.Button(
             rec_frame, text='🎤 Record', command=self._toggle_record,
             **btn_style)
-        self._btn_record.pack(side='left', expand=True, fill='x', padx=(0, 2))
-        tk.Button(rec_frame, text='✕ Clear',
-                  command=lambda: self.v_custom_notes.set(''),
-                  **btn_style).pack(side='left', expand=True, fill='x', padx=(2, 4))
+        self._btn_record.grid(row=0, column=0, sticky='w')
+
         self._lbl_hearing = tk.Label(
             rec_frame, text='', bg='#1e1e1e', fg='#ffaa00',
             font=('Arial', 13, 'bold'), width=3)
-        self._lbl_hearing.pack(side='left')
+        self._lbl_hearing.grid(row=0, column=2)
+
+        tk.Button(rec_frame, text='✕ Clear',
+                  command=lambda: self.v_custom_notes.set(''),
+                  **btn_style).grid(row=0, column=3, sticky='e')
 
         self._info = tk.Label(ctrl, text='', bg='#1e1e1e', fg='#888888',
                               font=('Arial', 9), wraplength=200, justify='left')
