@@ -664,6 +664,7 @@ class App(tk.Tk):
 
         self._build_controls()
         self._build_preview()
+        self._build_output()
         self._refresh()
 
     # ── Control panel ─────────────────────────────────────────────────────────
@@ -672,83 +673,48 @@ class App(tk.Tk):
         ctrl = tk.Frame(self, bg='#1e1e1e', padx=12, pady=10)
         ctrl.grid(row=0, column=0, sticky='nsw')
 
-        lbl_opts = dict(bg='#1e1e1e', fg='#cccccc', font=('Arial', 11))
+        lbl_opts  = dict(bg='#1e1e1e', fg='#cccccc', font=('Arial', 11))
+        btn_style = dict(font=('Arial', 11), padx=8, pady=4)
         combo_opts = dict(state='readonly', width=14, font=('Arial', 11))
 
-        def row(label, var, choices, r):
+        def sep(r):
+            ttk.Separator(ctrl, orient='horizontal').grid(
+                row=r, columnspan=2, sticky='ew', pady=8)
+
+        def combo_row(label, var, choices, r):
             tk.Label(ctrl, text=label, **lbl_opts).grid(
                 row=r, column=0, sticky='w', pady=3)
             cb = ttk.Combobox(ctrl, textvariable=var, values=choices, **combo_opts)
             cb.grid(row=r, column=1, sticky='w', padx=(6, 0), pady=3)
             cb.bind('<<ComboboxSelected>>', lambda _: self._refresh())
-            return cb
 
-        self.v_harp  = tk.StringVar(value='C')
-        self.v_key   = tk.StringVar(value='C')
-        self.v_mode  = tk.StringVar(value='major')
-        self.v_dark  = tk.BooleanVar(value=False)
+        # ── Section 1: Canonical ──────────────────────────────────────────────
 
-        row('Harp key:',    self.v_harp,  NOTES,        0)
-        row('Scale key:',   self.v_key,   NOTES,        1)
-        row('Mode:',        self.v_mode,  MODES,        2)
+        self.v_harp = tk.StringVar(value='C')
+        self.v_key  = tk.StringVar(value='C')
+        self.v_mode = tk.StringVar(value='major')
+        self.v_dark = tk.BooleanVar(value=False)
 
-        ttk.Separator(ctrl, orient='horizontal').grid(
-            row=3, columnspan=2, sticky='ew', pady=8)
+        combo_row('Harp key:',  self.v_harp, NOTES, 0)
+        combo_row('Scale key:', self.v_key,  NOTES, 1)
+        combo_row('Mode:',      self.v_mode, MODES, 2)
+        sep(3)
 
-        cb_dark = tk.Checkbutton(
-            ctrl, text='Dark background',
-            variable=self.v_dark,
+        tk.Checkbutton(
+            ctrl, text='Dark background', variable=self.v_dark,
             command=self._refresh,
             bg='#1e1e1e', fg='#cccccc', selectcolor='#333333',
             activebackground='#1e1e1e', activeforeground='#cccccc',
-            font=('Arial', 11))
-        cb_dark.grid(row=4, column=0, sticky='w', pady=2)
+            font=('Arial', 11)).grid(row=4, column=0, sticky='w', pady=2)
 
         tk.Button(ctrl, text='→ Custom', command=self._push_to_custom,
                   font=('Arial', 10), padx=4, pady=2).grid(
             row=4, column=1, sticky='e', pady=2)
 
-        ttk.Separator(ctrl, orient='horizontal').grid(
-            row=5, columnspan=2, sticky='ew', pady=8)
+        sep(5)
 
-        btn_style = dict(font=('Arial', 11), padx=8, pady=4)
-        export_frame = tk.Frame(ctrl, bg='#1e1e1e')
-        export_frame.grid(row=6, columnspan=2, sticky='ew', pady=2)
-        tk.Button(export_frame, text='Export PNG…',
-                  command=self._export, **btn_style).pack(
-            side='left', expand=True, fill='x', padx=(0, 2))
-        tk.Button(export_frame, text='Copy',
-                  command=self._copy, **btn_style).pack(
-            side='left', expand=True, fill='x', padx=(2, 0))
+        # ── Section 2: Custom Path ────────────────────────────────────────────
 
-        ttk.Separator(ctrl, orient='horizontal').grid(
-            row=7, columnspan=2, sticky='ew', pady=8)
-
-        # Tempo
-        self.v_tempo = tk.IntVar(value=150)
-        tk.Label(ctrl, text='Tempo (BPM):', **lbl_opts).grid(
-            row=8, column=0, sticky='w', pady=3)
-        tk.Spinbox(ctrl, from_=40, to=240, textvariable=self.v_tempo,
-                   width=5, font=('Arial', 11)).grid(
-            row=8, column=1, sticky='w', padx=(6, 0), pady=3)
-
-        # Play buttons
-        play_frame = tk.Frame(ctrl, bg='#1e1e1e')
-        play_frame.grid(row=9, columnspan=2, sticky='ew', pady=(6, 2))
-        tk.Button(play_frame, text='◀ Play',
-                  command=lambda: self._play(forward=False),
-                  **btn_style).pack(side='left', expand=True, fill='x', padx=(0, 2))
-        tk.Button(play_frame, text='Play ▶',
-                  command=lambda: self._play(forward=True),
-                  **btn_style).pack(side='left', expand=True, fill='x', padx=(2, 0))
-
-        tk.Button(ctrl, text='■ Stop', command=self._stop,
-                  **btn_style).grid(row=10, columnspan=2, sticky='ew', pady=2)
-
-        ttk.Separator(ctrl, orient='horizontal').grid(
-            row=11, columnspan=2, sticky='ew', pady=8)
-
-        # Custom path section
         self.v_custom         = tk.BooleanVar(value=False)
         self.v_custom_title   = tk.StringVar()
         self.v_custom_notes   = tk.StringVar()   # Path (red line)
@@ -756,51 +722,68 @@ class App(tk.Tk):
         self.v_custom_green   = tk.StringVar()   # Green/root notes
 
         tk.Checkbutton(
-            ctrl, text='Custom path',
-            variable=self.v_custom,
+            ctrl, text='Custom path', variable=self.v_custom,
             command=self._on_custom_toggle,
             bg='#1e1e1e', fg='#cccccc', selectcolor='#333333',
             activebackground='#1e1e1e', activeforeground='#cccccc',
-            font=('Arial', 11)).grid(row=12, columnspan=2, sticky='w', pady=2)
+            font=('Arial', 11)).grid(row=6, columnspan=2, sticky='w', pady=2)
 
-        def _custom_entry(row_num, label, var):
+        def _custom_entry(r, label, var):
             tk.Label(ctrl, text=label, **lbl_opts).grid(
-                row=row_num, column=0, sticky='w', pady=2)
+                row=r, column=0, sticky='w', pady=2)
             ent = tk.Entry(ctrl, textvariable=var,
                            width=16, font=('Arial', 11), state='disabled',
                            disabledforeground='#555555')
-            ent.grid(row=row_num, column=1, sticky='ew', padx=(6, 0), pady=2)
+            ent.grid(row=r, column=1, sticky='ew', padx=(6, 0), pady=2)
             var.trace_add('write', lambda *_: self._refresh())
             return ent
 
-        self._ent_title   = _custom_entry(13, 'Title:',   self.v_custom_title)
-        self._ent_notes   = _custom_entry(14, 'Path:',    self.v_custom_notes)
-        self._ent_utility = _custom_entry(15, 'Utility:', self.v_custom_utility)
-        self._ent_green   = _custom_entry(16, 'Green:',   self.v_custom_green)
+        self._ent_title   = _custom_entry(7,  'Title:',   self.v_custom_title)
+        self._ent_notes   = _custom_entry(8,  'Path:',    self.v_custom_notes)
+        self._ent_utility = _custom_entry(9,  'Utility:', self.v_custom_utility)
+        self._ent_green   = _custom_entry(10, 'Green:',   self.v_custom_green)
 
-        # Record-from-mic controls
+        sep(11)
+
+        # ── Section 3: Play-It (mic input) ────────────────────────────────────
+
+        tk.Label(ctrl, text='Play-It', bg='#1e1e1e', fg='#cccccc',
+                 font=('Arial', 11, 'bold')).grid(
+            row=12, columnspan=2, sticky='w', pady=(0, 4))
+
+        self.v_playin = tk.StringVar()
+        self.v_playin.trace_add('write', lambda *_: self._refresh())
+        playin_ent = tk.Entry(ctrl, textvariable=self.v_playin,
+                              width=16, font=('Arial', 11))
+        playin_ent.grid(row=13, columnspan=2, sticky='ew', pady=2)
+
         rec_frame = tk.Frame(ctrl, bg='#1e1e1e')
-        rec_frame.grid(row=17, columnspan=2, sticky='ew', pady=(4, 0))
-        # Column 1 is the expanding spacer; column 3 (Clear) is right-aligned.
-        rec_frame.columnconfigure(1, weight=1, minsize=20)
+        rec_frame.grid(row=14, columnspan=2, sticky='ew', pady=(4, 0))
+        rec_frame.columnconfigure(1, weight=1, minsize=10)
 
         self._btn_record = tk.Button(
-            rec_frame, text='🎤 Record', command=self._toggle_record,
-            **btn_style)
+            rec_frame, text='🎤 Record', command=self._toggle_record, **btn_style)
         self._btn_record.grid(row=0, column=0, sticky='w')
 
         self._lbl_hearing = tk.Label(
             rec_frame, text='', bg='#1e1e1e', fg='#ffaa00',
             font=('Arial', 13, 'bold'), width=3)
-        self._lbl_hearing.grid(row=0, column=2)
+        self._lbl_hearing.grid(row=0, column=1, sticky='w', padx=(4, 0))
 
         tk.Button(rec_frame, text='✕ Clear',
-                  command=lambda: self.v_custom_notes.set(''),
-                  **btn_style).grid(row=0, column=3, sticky='e')
+                  command=lambda: self.v_playin.set(''),
+                  **btn_style).grid(row=0, column=2, padx=(4, 0))
+
+        tk.Button(rec_frame, text='→ Custom',
+                  command=self._push_playin_to_custom,
+                  font=('Arial', 10), padx=4, pady=2).grid(
+            row=0, column=3, sticky='e', padx=(8, 0))
+
+        sep(15)
 
         self._info = tk.Label(ctrl, text='', bg='#1e1e1e', fg='#888888',
                               font=('Arial', 9), wraplength=200, justify='left')
-        self._info.grid(row=18, columnspan=2, sticky='w', pady=(8, 0))
+        self._info.grid(row=16, columnspan=2, sticky='w', pady=(0, 4))
 
     # ── Preview canvas ─────────────────────────────────────────────────────────
 
@@ -809,8 +792,36 @@ class App(tk.Tk):
         ph = int(IMG_H * PREVIEW_SCALE)
         self._canvas = tk.Canvas(self, width=pw, height=ph,
                                   bg='black', highlightthickness=0)
-        self._canvas.grid(row=0, column=1, padx=(0, 12), pady=12)
+        self._canvas.grid(row=0, column=1, padx=(0, 12), pady=(12, 4))
         self._tk_img = None
+
+    # ── Output strip (below canvas) ────────────────────────────────────────────
+
+    def _build_output(self):
+        out = tk.Frame(self, bg='#1e1e1e', padx=8, pady=6)
+        out.grid(row=1, column=1, sticky='ew', padx=(0, 12), pady=(0, 10))
+
+        btn = dict(font=('Arial', 11), padx=8, pady=4)
+
+        tk.Button(out, text='Export PNG…', command=self._export, **btn).pack(
+            side='left', padx=(0, 4))
+        tk.Button(out, text='Copy', command=self._copy, **btn).pack(
+            side='left', padx=(0, 16))
+
+        tk.Label(out, text='Tempo:', bg='#1e1e1e', fg='#cccccc',
+                 font=('Arial', 11)).pack(side='left')
+        self.v_tempo = tk.IntVar(value=150)
+        tk.Spinbox(out, from_=40, to=240, textvariable=self.v_tempo,
+                   width=4, font=('Arial', 11)).pack(side='left', padx=(4, 12))
+
+        tk.Button(out, text='◀ Play',
+                  command=lambda: self._play(forward=False), **btn).pack(
+            side='left', padx=(0, 4))
+        tk.Button(out, text='Play ▶',
+                  command=lambda: self._play(forward=True), **btn).pack(
+            side='left', padx=(0, 4))
+        tk.Button(out, text='■ Stop', command=self._stop, **btn).pack(
+            side='left')
 
     # ── Mic recording ──────────────────────────────────────────────────────────
 
@@ -821,11 +832,6 @@ class App(tk.Tk):
             self._start_record()
 
     def _start_record(self):
-        # Auto-enable custom path mode so captured notes have somewhere to go
-        if not self.v_custom.get():
-            self.v_custom.set(True)
-            self._on_custom_toggle()
-
         self._recording = True
         self._btn_record.config(text='⏹ Stop', fg='red')
         self._capture.start()
@@ -846,14 +852,23 @@ class App(tk.Tk):
         live = self._capture.current_note
         self._lbl_hearing.config(text=live or '·')
 
-        # Append any newly confirmed notes to the Notes field
+        # Append newly confirmed notes to the Play-It textbox
         new_notes = self._capture.drain()
         if new_notes:
-            existing = self.v_custom_notes.get().strip()
-            appended = (' '.join(filter(None, [existing] + new_notes)))
-            self.v_custom_notes.set(appended)
+            existing = self.v_playin.get().strip()
+            self.v_playin.set(' '.join(filter(None, [existing] + new_notes)))
 
         self.after(60, self._poll_capture)
+
+    # ── Push Play-It → Custom Path ────────────────────────────────────────────
+
+    def _push_playin_to_custom(self):
+        """Copy Play-It notes into the Custom Path's Path field and enable it."""
+        notes = self.v_playin.get().strip()
+        if notes:
+            self.v_custom_notes.set(notes)
+        self.v_custom.set(True)
+        self._on_custom_toggle()
 
     # ── Push canonical state → custom fields ──────────────────────────────────
 
@@ -912,6 +927,12 @@ class App(tk.Tk):
 
         try:
             path_notes, c_util, c_green, custom_title = self._custom_params()
+            # Fall back to Play-It notes when Custom Path is off
+            if path_notes is None:
+                playin_raw = self.v_playin.get().strip()
+                if playin_raw:
+                    path_notes = parse_note_names(playin_raw)
+                    c_util, c_green, custom_title = set(), set(), None
             img = render(key, mode, harp_key, dark_bg=self.v_dark.get(),
                          path_notes=path_notes, custom_title=custom_title,
                          custom_utility=c_util, custom_green=c_green)
@@ -958,15 +979,19 @@ class App(tk.Tk):
 
         try:
             path_notes, _, _, _ = self._custom_params()
+            if path_notes is None:
+                playin_raw = self.v_playin.get().strip()
+                if playin_raw:
+                    path_notes = parse_note_names(playin_raw)
         except ValueError:
             return
 
         if path_notes is not None:
-            note_set  = set(path_notes)
+            note_set     = set(path_notes)
             anchor_class = NOTES.index(path_notes[0])
         else:
             _, _, pent = pentatonic_info(key, mode)
-            note_set  = set(pent)
+            note_set     = set(pent)
             anchor_class = NOTES.index(key)
 
         path = pentatonic_path(harp_key, note_set)
