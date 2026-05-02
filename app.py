@@ -562,9 +562,9 @@ def render(scale_key, mode, harp_key, dark_bg=True,
     dc  = ImageDraw.Draw(img)
 
     f_title = _load_font(26, bold=True)
-    f_note  = _load_font(24, bold=True)
+    f_note  = _load_font(28, bold=True)
     f_small = _load_font(14)
-    f_tiny  = _load_font(14, bold=True)
+    f_tiny  = _load_font(17, bold=True)
 
     # Title: custom string or auto-generated
     title_str = custom_title if custom_title else _make_title(scale_key, mode, harp_key)
@@ -867,6 +867,7 @@ class App(tk.Tk):
         notes = self.v_playin.get().strip()
         if notes:
             self.v_custom_notes.set(notes)
+        self.v_custom_title.set('Played')
         self.v_custom.set(True)
         self._on_custom_toggle()
 
@@ -884,7 +885,7 @@ class App(tk.Tk):
         # Sort green notes by NOTES order for consistent display
         green_notes.sort(key=NOTES.index)
 
-        self.v_custom_title.set(_make_title(key, mode, harp_key))
+        self.v_custom_title.set('*' + _make_title(key, mode, harp_key))
         self.v_custom_notes.set(' '.join(pent))
         self.v_custom_utility.set(' '.join(sorted(orange, key=NOTES.index)))
         self.v_custom_green.set(' '.join(green_notes))
