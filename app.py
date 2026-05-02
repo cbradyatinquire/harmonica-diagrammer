@@ -149,6 +149,12 @@ class NoteCapture:
             self._current_note = note
             self._held_secs    = chunk_s
 
+        # Clear the duplicate gate during silence so a note can re-fire
+        # after a pause — allows riffs with intentional repeated notes.
+        # Accidental same-note double-triggers (no gap) are still suppressed.
+        if note is None:
+            self._last_emitted = None
+
         if (note is not None
                 and self._held_secs >= _MIN_NOTE_SECS
                 and note != self._last_emitted):
