@@ -373,6 +373,14 @@ IMG_H = (TITLE_H + OVER_H + ROW_H + MAX_DRAW_B * DRAW_BEND_H +
          ROW_H + MAX_BLOW_B * BLOW_BEND_H + BOT_MARGIN)
 # = 56 + 22 + 72 + 66 + 72 + 44 + 18 = 350
 
+EXPORT_PAD = 10   # uniform margin (px) around content on left, right, and bottom
+# Fixed bottom of every exported image: bottom pixel of deepest blow-bend ellipse
+# (blow-bend at level MAX_BLOW_B-1) plus EXPORT_PAD. Ensures all images are the
+# same height regardless of which bends are actually drawn.
+EXPORT_BOTTOM = (TITLE_H + OVER_H + ROW_H + MAX_DRAW_B * DRAW_BEND_H
+                 + ROW_H + (MAX_BLOW_B - 1) * BLOW_BEND_H
+                 + BLOW_BEND_H // 2 + BEND_RY + 1 + EXPORT_PAD)   # = 369
+
 # Fixed colours (same regardless of background)
 PENT_C    = (255, 210, 0  )   # yellow-gold: pentatonic non-root
 ROOT_C    = (0,   200, 60 )   # green: root note
@@ -386,11 +394,11 @@ def _theme(dark_bg):
     if dark_bg:
         return dict(bg=(0,0,0), title=(0,0,0), title_bg=(238,238,238),
                     plain=(190,190,190), bend=(155,155,155),
-                    outline_lw=3)
+                    outline_lw=4)
     else:
         return dict(bg=(255,255,255), title=(255,255,255), title_bg=(18,18,18),
                     plain=(0,0,0), bend=(0,0,0),
-                    outline_lw=2)
+                    outline_lw=3)
 
 # Y-positions
 def _over_y():
@@ -502,10 +510,10 @@ def _make_title(scale_key, mode, harp_key):
     pair = relative_pair(scale_key, mode)
     if pair:
         maj, minn = pair
-        body = f"{maj} Major   or   {minn} Minor"
+        body = f"{maj} Major or {minn} Minor"
     else:
         body = f"{scale_key} {MODE_DISPLAY[MODES.index(mode)]}"
-    return f"{body}   on a   {harp_key} Harp"
+    return f"{body} on a {harp_key} Harp"
 
 
 _SHARP_TO_FLAT = {
@@ -526,6 +534,28 @@ def parse_note_names(text):
             raise ValueError(f"unknown note '{raw}'")
         result.append(t)
     return result
+
+
+def _tight_crop(img, bg_color):
+    """Crop left / right / bottom to content + EXPORT_PAD pixels.
+    Top is kept at y=0 so the title bar stays flush with the image edge.
+    Column detection ignores the title bar (which spans full width) by
+    examining only the body rows below it."""
+    arr  = np.array(img)
+    bg   = np.array(bg_color, dtype=np.uint8)
+    body = arr[TITLE_H:, :, :]                         # skip title rows
+    mask    = ~np.all(body == bg, axis=2)              # True where pixel ≠ background
+    col_any = np.any(mask, axis=0)
+    if not np.any(col_any):
+        return img
+    cmin = int(np.argmax(col_any))
+    cmax = int(len(col_any) - 1 - np.argmax(col_any[::-1]))
+    left   = max(0,          cmin - EXPORT_PAD)
+    right  = min(img.width,  cmax + 1 + EXPORT_PAD)
+    # Fixed bottom: always clip at EXPORT_BOTTOM so every image is the same height
+    # regardless of which bends happen to be drawn.
+    bottom = min(img.height, EXPORT_BOTTOM)
+    return img.crop((left, 0, right, bottom))
 
 
 def render(scale_key, mode, harp_key, dark_bg=True,
@@ -561,10 +591,10 @@ def render(scale_key, mode, harp_key, dark_bg=True,
     img = Image.new('RGB', (IMG_W, IMG_H), t['bg'])
     dc  = ImageDraw.Draw(img)
 
-    f_title = _load_font(26, bold=True)
-    f_note  = _load_font(28, bold=True)
+    f_title = _load_font(36, bold=True)
+    f_note  = _load_font(36, bold=True)
     f_small = _load_font(14)
-    f_tiny  = _load_font(17, bold=True)
+    f_tiny  = _load_font(23, bold=True)
 
     # Title: custom string or auto-generated
     title_str = custom_title if custom_title else _make_title(scale_key, mode, harp_key)
@@ -629,6 +659,7 @@ def render(scale_key, mode, harp_key, dark_bg=True,
             _render_bend_note(dc, cx, y, note, pent_set, green_notes,
                               orange_set, f_tiny, t)
 
+    img = _tight_crop(img, t['bg'])
     return img
 
 def _copy_to_clipboard(img):
@@ -782,14 +813,18 @@ class App(tk.Tk):
         sep(15)
 
         self._info = tk.Label(ctrl, text='', bg='#1e1e1e', fg='#888888',
-                              font=('Arial', 9), wraplength=200, justify='left')
+                              font=('Arial', 9), wraplength=200, justify='left',
+                              height=3, anchor='nw')
         self._info.grid(row=16, columnspan=2, sticky='w', pady=(0, 4))
 
     # ── Preview canvas ─────────────────────────────────────────────────────────
 
     def _build_preview(self):
-        pw = int(IMG_W * PREVIEW_SCALE)
-        ph = int(IMG_H * PREVIEW_SCALE)
+        # Approximate initial size — canvas is resized after first render
+        _init_w = IMG_W - 2 * (L_MARGIN + HOLE_W // 2 - CIRCLE_R - EXPORT_PAD)
+        _init_h = IMG_H - BOT_MARGIN + EXPORT_PAD   # rough estimate
+        pw = int(_init_w * PREVIEW_SCALE)
+        ph = int(_init_h * PREVIEW_SCALE)
         self._canvas = tk.Canvas(self, width=pw, height=ph,
                                   bg='black', highlightthickness=0)
         self._canvas.grid(row=0, column=1, padx=(0, 12), pady=(12, 4))
@@ -944,8 +979,9 @@ class App(tk.Tk):
             self._info.config(text=f"Error: {e}")
             return
 
-        pw = int(IMG_W * PREVIEW_SCALE)
-        ph = int(IMG_H * PREVIEW_SCALE)
+        pw = int(img.width  * PREVIEW_SCALE)
+        ph = int(img.height * PREVIEW_SCALE)
+        self._canvas.configure(width=pw, height=ph)
         preview = img.resize((pw, ph), Image.LANCZOS)
         self._tk_img = ImageTk.PhotoImage(preview)
         self._canvas.create_image(0, 0, anchor='nw', image=self._tk_img)
