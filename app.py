@@ -529,11 +529,14 @@ def parse_note_names(text):
 
 
 def render(scale_key, mode, harp_key, dark_bg=True,
-           path_notes=None, custom_title=None):
+           path_notes=None, custom_title=None,
+           custom_utility=None, custom_green=None):
     """Build and return a PIL Image of the pentatonic notation diagram.
 
-    path_notes  — if given, a list of note names that override the auto path.
-    custom_title — if given, replaces the auto-generated title string.
+    path_notes     — list of note names for the red path (overrides auto).
+    custom_title   — replaces the auto-generated title string.
+    custom_utility — set of note names shown orange (in-scale, not path).
+    custom_green   — set of note names shown green (explicit roots).
     """
     t = _theme(dark_bg)   # resolve background-dependent colours
 
@@ -543,11 +546,10 @@ def render(scale_key, mode, harp_key, dark_bg=True,
     ob = over_notes(harp_key)
 
     if path_notes is not None:
-        # Custom path mode: colour only the entered notes.
-        # Green if first == last (root), yellow for all others, no orange.
+        # Custom path mode: explicit sets for path, orange, and green.
         pent_set    = set(path_notes)
-        orange_set  = set()
-        green_notes = {path_notes[0]} if path_notes[0] == path_notes[-1] else set()
+        orange_set  = custom_utility if custom_utility is not None else set()
+        green_notes = custom_green   if custom_green   is not None else set()
         path        = pentatonic_path(harp_key, pent_set)
     else:
         _, orange_set, pent_list = pentatonic_info(scale_key, mode)
@@ -700,7 +702,11 @@ class App(tk.Tk):
             bg='#1e1e1e', fg='#cccccc', selectcolor='#333333',
             activebackground='#1e1e1e', activeforeground='#cccccc',
             font=('Arial', 11))
-        cb_dark.grid(row=4, columnspan=2, sticky='w', pady=2)
+        cb_dark.grid(row=4, column=0, sticky='w', pady=2)
+
+        tk.Button(ctrl, text='→ Custom', command=self._push_to_custom,
+                  font=('Arial', 10), padx=4, pady=2).grid(
+            row=4, column=1, sticky='e', pady=2)
 
         ttk.Separator(ctrl, orient='horizontal').grid(
             row=5, columnspan=2, sticky='ew', pady=8)
@@ -743,9 +749,11 @@ class App(tk.Tk):
             row=11, columnspan=2, sticky='ew', pady=8)
 
         # Custom path section
-        self.v_custom       = tk.BooleanVar(value=False)
-        self.v_custom_title = tk.StringVar()
-        self.v_custom_notes = tk.StringVar()
+        self.v_custom         = tk.BooleanVar(value=False)
+        self.v_custom_title   = tk.StringVar()
+        self.v_custom_notes   = tk.StringVar()   # Path (red line)
+        self.v_custom_utility = tk.StringVar()   # Orange notes
+        self.v_custom_green   = tk.StringVar()   # Green/root notes
 
         tk.Checkbutton(
             ctrl, text='Custom path',
@@ -755,27 +763,24 @@ class App(tk.Tk):
             activebackground='#1e1e1e', activeforeground='#cccccc',
             font=('Arial', 11)).grid(row=12, columnspan=2, sticky='w', pady=2)
 
-        tk.Label(ctrl, text='Title:', **lbl_opts).grid(
-            row=13, column=0, sticky='w', pady=3)
-        self._ent_title = tk.Entry(
-            ctrl, textvariable=self.v_custom_title,
-            width=16, font=('Arial', 11), state='disabled',
-            disabledforeground='#555555')
-        self._ent_title.grid(row=13, column=1, sticky='ew', padx=(6, 0), pady=3)
-        self.v_custom_title.trace_add('write', lambda *_: self._refresh())
+        def _custom_entry(row_num, label, var):
+            tk.Label(ctrl, text=label, **lbl_opts).grid(
+                row=row_num, column=0, sticky='w', pady=2)
+            ent = tk.Entry(ctrl, textvariable=var,
+                           width=16, font=('Arial', 11), state='disabled',
+                           disabledforeground='#555555')
+            ent.grid(row=row_num, column=1, sticky='ew', padx=(6, 0), pady=2)
+            var.trace_add('write', lambda *_: self._refresh())
+            return ent
 
-        tk.Label(ctrl, text='Notes:', **lbl_opts).grid(
-            row=14, column=0, sticky='w', pady=3)
-        self._ent_notes = tk.Entry(
-            ctrl, textvariable=self.v_custom_notes,
-            width=16, font=('Arial', 11), state='disabled',
-            disabledforeground='#555555')
-        self._ent_notes.grid(row=14, column=1, sticky='ew', padx=(6, 0), pady=3)
-        self.v_custom_notes.trace_add('write', lambda *_: self._refresh())
+        self._ent_title   = _custom_entry(13, 'Title:',   self.v_custom_title)
+        self._ent_notes   = _custom_entry(14, 'Path:',    self.v_custom_notes)
+        self._ent_utility = _custom_entry(15, 'Utility:', self.v_custom_utility)
+        self._ent_green   = _custom_entry(16, 'Green:',   self.v_custom_green)
 
         # Record-from-mic controls
         rec_frame = tk.Frame(ctrl, bg='#1e1e1e')
-        rec_frame.grid(row=15, columnspan=2, sticky='ew', pady=(4, 0))
+        rec_frame.grid(row=17, columnspan=2, sticky='ew', pady=(4, 0))
         # Column 1 is the expanding spacer; column 3 (Clear) is right-aligned.
         rec_frame.columnconfigure(1, weight=1, minsize=20)
 
@@ -795,7 +800,7 @@ class App(tk.Tk):
 
         self._info = tk.Label(ctrl, text='', bg='#1e1e1e', fg='#888888',
                               font=('Arial', 9), wraplength=200, justify='left')
-        self._info.grid(row=16, columnspan=2, sticky='w', pady=(8, 0))
+        self._info.grid(row=18, columnspan=2, sticky='w', pady=(8, 0))
 
     # ── Preview canvas ─────────────────────────────────────────────────────────
 
@@ -850,23 +855,53 @@ class App(tk.Tk):
 
         self.after(60, self._poll_capture)
 
+    # ── Push canonical state → custom fields ──────────────────────────────────
+
+    def _push_to_custom(self):
+        """Populate all custom-path fields from the current canonical state."""
+        key      = self.v_key.get()
+        mode     = self.v_mode.get()
+        harp_key = self.v_harp.get()
+
+        _, orange, pent = pentatonic_info(key, mode)
+        pair        = relative_pair(key, mode)
+        green_notes = list(set(pair)) if pair else [key]
+        # Sort green notes by NOTES order for consistent display
+        green_notes.sort(key=NOTES.index)
+
+        self.v_custom_title.set(_make_title(key, mode, harp_key))
+        self.v_custom_notes.set(' '.join(pent))
+        self.v_custom_utility.set(' '.join(sorted(orange, key=NOTES.index)))
+        self.v_custom_green.set(' '.join(green_notes))
+
+        # Switch to custom mode
+        self.v_custom.set(True)
+        self._on_custom_toggle()
+
     # ── Custom-path toggle ─────────────────────────────────────────────────────
 
     def _on_custom_toggle(self):
         state = 'normal' if self.v_custom.get() else 'disabled'
-        self._ent_title.config(state=state)
-        self._ent_notes.config(state=state)
+        for ent in (self._ent_title, self._ent_notes,
+                    self._ent_utility, self._ent_green):
+            ent.config(state=state)
         self._refresh()
 
     def _custom_params(self):
-        """Return (path_notes, custom_title) for the current custom-path state,
-        or (None, None) when custom mode is off.  Raises ValueError on bad notes."""
+        """Return (path_notes, custom_utility, custom_green, custom_title).
+        All are None/empty-set when custom mode is off.
+        Raises ValueError on unparseable note names."""
         if not self.v_custom.get():
-            return None, None
-        raw_notes = self.v_custom_notes.get().strip()
-        path_notes = parse_note_names(raw_notes) if raw_notes else None
-        custom_title = self.v_custom_title.get().strip() or None
-        return path_notes, custom_title
+            return None, None, None, None
+        def _parse(raw):
+            r = raw.strip()
+            return set(parse_note_names(r)) if r else set()
+        raw_path = self.v_custom_notes.get().strip()
+        path_notes    = parse_note_names(raw_path) if raw_path else None
+        custom_utility = _parse(self.v_custom_utility.get())
+        custom_green   = _parse(self.v_custom_green.get())
+        custom_title   = self.v_custom_title.get().strip() or None
+        return path_notes, custom_utility, custom_green, custom_title
 
     # ── Refresh ────────────────────────────────────────────────────────────────
 
@@ -876,9 +911,10 @@ class App(tk.Tk):
         mode     = self.v_mode.get()
 
         try:
-            path_notes, custom_title = self._custom_params()
+            path_notes, c_util, c_green, custom_title = self._custom_params()
             img = render(key, mode, harp_key, dark_bg=self.v_dark.get(),
-                         path_notes=path_notes, custom_title=custom_title)
+                         path_notes=path_notes, custom_title=custom_title,
+                         custom_utility=c_util, custom_green=c_green)
         except ValueError as e:
             self._info.config(text=f"Note error: {e}")
             return
@@ -894,12 +930,15 @@ class App(tk.Tk):
         self._current_img = img
 
         # Update info label
-        if self.v_custom.get() and self.v_custom_notes.get().strip():
-            try:
-                notes = parse_note_names(self.v_custom_notes.get())
-                self._info.config(text=f"Custom path: {' '.join(notes)}")
-            except ValueError as e:
-                self._info.config(text=f"Note error: {e}")
+        if self.v_custom.get():
+            parts = []
+            if self.v_custom_notes.get().strip():
+                parts.append(f"Path: {self.v_custom_notes.get().strip()}")
+            if self.v_custom_utility.get().strip():
+                parts.append(f"Utility: {self.v_custom_utility.get().strip()}")
+            if self.v_custom_green.get().strip():
+                parts.append(f"Green: {self.v_custom_green.get().strip()}")
+            self._info.config(text='\n'.join(parts) if parts else '')
         else:
             _, orange, pent = pentatonic_info(key, mode)
             self._info.config(
@@ -918,7 +957,7 @@ class App(tk.Tk):
         mode     = self.v_mode.get()
 
         try:
-            path_notes, _ = self._custom_params()
+            path_notes, _, _, _ = self._custom_params()
         except ValueError:
             return
 
@@ -963,12 +1002,13 @@ class App(tk.Tk):
     def _current_render(self):
         """Re-render at full resolution with current settings."""
         try:
-            path_notes, custom_title = self._custom_params()
+            path_notes, c_util, c_green, custom_title = self._custom_params()
         except ValueError:
-            path_notes, custom_title = None, None
+            path_notes, c_util, c_green, custom_title = None, None, None, None
         return render(self.v_key.get(), self.v_mode.get(),
                       self.v_harp.get(), dark_bg=self.v_dark.get(),
-                      path_notes=path_notes, custom_title=custom_title)
+                      path_notes=path_notes, custom_title=custom_title,
+                      custom_utility=c_util, custom_green=c_green)
 
     def _copy(self):
         img = self._current_render()
