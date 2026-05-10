@@ -1,11 +1,43 @@
 #!/usr/bin/env python3
 """Harmonica Pentatonic Notation Editor — Phase 1"""
 
+import os
+import sys
+
+# ── Bundled-library bootstrap ──────────────────────────────────────────────────
+# When running as a PyInstaller .app, dylibs live in Contents/Frameworks/.
+# The Python `fluidsynth` package uses ctypes.util.find_library('fluidsynth'),
+# which only searches system paths and returns None inside the bundle.
+# We patch find_library before the import so it hands back the bundled path.
+def _patch_fluidsynth_search():
+    if not getattr(sys, 'frozen', False):
+        return   # dev environment: rely on Homebrew install as normal
+    exe_dir    = os.path.dirname(sys.executable)          # .app/Contents/MacOS/
+    frameworks = os.path.normpath(os.path.join(exe_dir, '..', 'Frameworks'))
+    bundled    = None
+    for name in ('libfluidsynth.3.5.3.dylib',
+                 'libfluidsynth.3.dylib',
+                 'libfluidsynth.dylib'):
+        candidate = os.path.join(frameworks, name)
+        if os.path.exists(candidate):
+            bundled = candidate
+            break
+    if bundled is None:
+        return   # nothing to patch — will fail naturally with a clear error
+    import ctypes.util
+    _orig = ctypes.util.find_library
+    def _patched(name):
+        if name == 'fluidsynth':
+            return bundled
+        return _orig(name)
+    ctypes.util.find_library = _patched
+
+_patch_fluidsynth_search()
+# ──────────────────────────────────────────────────────────────────────────────
+
 import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageDraw, ImageFont, ImageTk
-import os
-import sys
 import threading
 import time
 import queue
@@ -350,6 +382,86 @@ def pentatonic_path(harp_root, pent_set):
     positions.sort(key=lambda x: (x[0], x[1]))
     return [(h, r) for (_, h, r) in positions]
 
+
+# ─── Ordered-path helpers (for "riff" / non-extended custom path) ─────────────
+
+import re as _re
+
+def _all_note_positions_map(harp_root):
+    """Return {note_name: [(midi_offset, hole, row_type), ...]} for every note
+    reachable on harp_root, sorted ascending by midi_offset within each list.
+    Covers blow, draw, all bends, and non-suppressed overblows/overdraws."""
+    from collections import defaultdict
+    out = defaultdict(list)
+    SUPPRESS_OVER = {1, 2, 7}
+    ob = over_notes(harp_root)
+    for i in range(10):
+        b, d = BLOW_OFF[i], DRAW_OFF[i]
+        out[harp_note(harp_root, b)].append((b, i, 'blow'))
+        out[harp_note(harp_root, d)].append((d, i, 'draw'))
+        if d > b:   # draw bends
+            for j in range(1, d - b):
+                out[harp_note(harp_root, d - j)].append((d - j, i, ('draw_bend', j - 1)))
+        if b > d:   # blow bends
+            for j in range(1, b - d):
+                out[harp_note(harp_root, b - j)].append((b - j, i, ('blow_bend', j - 1)))
+        if i not in SUPPRESS_OVER and ob[i]:
+            off = (DRAW_OFF[i] + 1) if d < b else (BLOW_OFF[i] + 1)
+            out[ob[i]].append((off, i, 'over'))
+    for v in out.values():
+        v.sort(key=lambda x: x[0])
+    return dict(out)
+
+
+def parse_path_spec(text):
+    """Parse an ordered-path string like 'C2 D Eb G1' into
+    [(note_name, occurrence_or_None), ...].
+
+    A trailing digit is a 1-based occurrence index (sorted lowest→highest pitch).
+    No digit means 'next occurrence above the previous note's pitch'.
+    Accepts sharps; normalises to the flat spellings used in NOTES."""
+    tokens = []
+    for raw in text.replace(',', ' ').split():
+        m = _re.match(r'^([A-G][b#]?)(\d+)?$', raw.strip(), _re.IGNORECASE)
+        if not m:
+            raise ValueError(f"unrecognised token '{raw}' in path spec")
+        note_raw = m.group(1)[0].upper() + m.group(1)[1:].lower()
+        note_name = _SHARP_TO_FLAT.get(note_raw, note_raw)
+        if note_name not in NOTES:
+            raise ValueError(f"unknown note '{raw}'")
+        occ = int(m.group(2)) if m.group(2) else None
+        tokens.append((note_name, occ))
+    return tokens
+
+
+def build_ordered_path(spec_tokens, harp_root):
+    """Convert [(note_name, occurrence_or_None), ...] into an ordered list of
+    harp positions [(hole, row_type), ...].
+
+    occurrence=N  → the Nth position of that note sorted ascending (1-based).
+    occurrence=None → the next occurrence strictly above the previous note's pitch;
+                      if none exists (descending riff), wraps to the lowest."""
+    note_map = _all_note_positions_map(harp_root)
+    path = []
+    prev_off = -999
+    for note_name, occ in spec_tokens:
+        positions = note_map.get(note_name, [])
+        if not positions:
+            continue
+        if occ is not None:
+            idx = occ - 1
+            if 0 <= idx < len(positions):
+                off, hole, row = positions[idx]
+                path.append((hole, row))
+                prev_off = off
+        else:
+            above = [(o, h, r) for o, h, r in positions if o > prev_off]
+            off, hole, row = above[0] if above else positions[0]
+            path.append((hole, row))
+            prev_off = off
+    return path
+
+
 # ─── Renderer ─────────────────────────────────────────────────────────────────
 
 # Geometry
@@ -380,12 +492,21 @@ IMG_H = (TITLE_H + OVER_H + ROW_H + MAX_DRAW_B * DRAW_BEND_H +
 # = 56 + 22 + 72 + 66 + 72 + 44 + 18 = 350
 
 EXPORT_PAD = 10   # uniform margin (px) around content on left, right, and bottom
-# Fixed bottom of every exported image: bottom pixel of deepest blow-bend ellipse
-# (blow-bend at level MAX_BLOW_B-1) plus EXPORT_PAD. Ensures all images are the
-# same height regardless of which bends are actually drawn.
+
+# Fixed crop boundaries — every exported image has identical dimensions regardless
+# of which notes are drawn, so octave-shift comparisons look stable side-by-side.
+#
+# Left/right: anchored on the outermost circle edges of holes 0 and 9.
+#   hole_x(i) = L_MARGIN + i*HOLE_W + HOLE_W//2
+#   leftmost circle edge  = hole_x(0) - CIRCLE_R = L_MARGIN + HOLE_W//2 - CIRCLE_R
+#   rightmost circle edge = hole_x(9) + CIRCLE_R
+EXPORT_LEFT   = L_MARGIN + HOLE_W // 2 - CIRCLE_R - EXPORT_PAD          # = 44
+EXPORT_RIGHT  = L_MARGIN + 9 * HOLE_W + HOLE_W // 2 + CIRCLE_R + 1 + EXPORT_PAD  # = 877
+
+# Bottom: bottom pixel of deepest blow-bend ellipse + EXPORT_PAD.
 EXPORT_BOTTOM = (TITLE_H + OVER_H + ROW_H + MAX_DRAW_B * DRAW_BEND_H
                  + ROW_H + (MAX_BLOW_B - 1) * BLOW_BEND_H
-                 + BLOW_BEND_H // 2 + BEND_RY + 1 + EXPORT_PAD)   # = 369
+                 + BLOW_BEND_H // 2 + BEND_RY + 1 + EXPORT_PAD)         # = 369
 
 # Fixed colours (same regardless of background)
 PENT_C    = (255, 210, 0  )   # yellow-gold: pentatonic non-root
@@ -498,18 +619,32 @@ def _pos_xy(hole_idx, row_type):
 
 
 def _render_bend_note(dc, cx, cy, note, pent_set, green_notes, orange_set,
-                      f_tiny, theme, rx=BEND_RX, ry=BEND_RY):
-    """Draw a bend-level note as a wide ellipse (pentatonic) or rounded rect (orange) or plain text."""
+                      f_tiny, theme, rx=BEND_RX, ry=BEND_RY, orange_only=False,
+                      pent_positions=None):
+    """Draw a bend-level note as a wide ellipse (pentatonic) or rounded rect (orange) or plain text.
+
+    orange_only=True   → draw only orange notes (first pass, behind path lines).
+    orange_only=False  → draw only non-orange notes (second pass, over path lines).
+    pent_positions     → when set (ordered mode), only this specific position is
+                         coloured; other holes with the same note name stay plain.
+                         Should be a single-element set {(hole, row_type)} or None.
+    """
     lw = theme['outline_lw']
-    if note in pent_set:
-        fill = ROOT_C if note in green_notes else PENT_C
-        _draw_ellipse(dc, cx, cy, rx, ry, fill, LINE_C, lw=lw)
-        _center_text(dc, cx, cy, note, f_tiny, TEXT_C)
+    # In ordered mode, pent_positions is a singleton set for this exact position.
+    # A non-empty set means this position IS in the path; empty/None means not.
+    in_path = (bool(pent_positions)) if pent_positions is not None else (note in pent_set)
+    if in_path:
+        if not orange_only:
+            fill = ROOT_C if note in green_notes else PENT_C
+            _draw_ellipse(dc, cx, cy, rx, ry, fill, LINE_C, lw=lw)
+            _center_text(dc, cx, cy, note, f_tiny, TEXT_C)
     elif note in orange_set:
-        _draw_rounded_rect(dc, cx, cy, rx * 2, ry * 2, ORANGE_C, OUTLINE_C, radius=4, lw=lw)
-        _center_text(dc, cx, cy, note, f_tiny, TEXT_C)
+        if orange_only:
+            _draw_rounded_rect(dc, cx, cy, rx * 2, ry * 2, ORANGE_C, OUTLINE_C, radius=4, lw=lw)
+            _center_text(dc, cx, cy, note, f_tiny, TEXT_C)
     else:
-        _center_text(dc, cx, cy, note, f_tiny, theme['bend'])
+        if not orange_only:
+            _center_text(dc, cx, cy, note, f_tiny, theme['bend'])
 
 
 def _make_title(scale_key, mode, harp_key):
@@ -543,33 +678,22 @@ def parse_note_names(text):
 
 
 def _tight_crop(img, bg_color):
-    """Crop left / right / bottom to content + EXPORT_PAD pixels.
-    Top is kept at y=0 so the title bar stays flush with the image edge.
-    Column detection ignores the title bar (which spans full width) by
-    examining only the body rows below it."""
-    arr  = np.array(img)
-    bg   = np.array(bg_color, dtype=np.uint8)
-    body = arr[TITLE_H:, :, :]                         # skip title rows
-    mask    = ~np.all(body == bg, axis=2)              # True where pixel ≠ background
-    col_any = np.any(mask, axis=0)
-    if not np.any(col_any):
-        return img
-    cmin = int(np.argmax(col_any))
-    cmax = int(len(col_any) - 1 - np.argmax(col_any[::-1]))
-    left   = max(0,          cmin - EXPORT_PAD)
-    right  = min(img.width,  cmax + 1 + EXPORT_PAD)
-    # Fixed bottom: always clip at EXPORT_BOTTOM so every image is the same height
-    # regardless of which bends happen to be drawn.
-    bottom = min(img.height, EXPORT_BOTTOM)
-    return img.crop((left, 0, right, bottom))
+    """Crop to fixed boundaries so every image has identical dimensions.
+    EXPORT_LEFT/RIGHT are anchored on the outermost hole circle edges;
+    EXPORT_BOTTOM is anchored on the deepest possible blow-bend ellipse.
+    All include EXPORT_PAD, giving a uniform margin on all sides."""
+    return img.crop((EXPORT_LEFT, 0, EXPORT_RIGHT, EXPORT_BOTTOM))
 
 
 def render(scale_key, mode, harp_key, dark_bg=True,
            path_notes=None, custom_title=None,
-           custom_utility=None, custom_green=None):
+           custom_utility=None, custom_green=None,
+           ordered_path=None):
     """Build and return a PIL Image of the pentatonic notation diagram.
 
-    path_notes     — list of note names for the red path (overrides auto).
+    path_notes     — list of note names; pentatonic_path extends to all octaves.
+    ordered_path   — explicit [(hole, row_type), ...] sequence; drawn in order,
+                     no fork-spreading (overrides path_notes when set).
     custom_title   — replaces the auto-generated title string.
     custom_utility — set of note names shown orange (in-scale, not path).
     custom_green   — set of note names shown green (explicit roots).
@@ -581,18 +705,32 @@ def render(scale_key, mode, harp_key, dark_bg=True,
     bb = blow_bends(harp_key)
     ob = over_notes(harp_key)
 
-    if path_notes is not None:
-        # Custom path mode: explicit sets for path, orange, and green.
+    midi_root = 60 + NOTES.index(harp_key)
+
+    if ordered_path is not None:
+        # Riff / ordered mode: exact positions in sequence, no fork-spreading.
+        # pent_positions restricts yellow/green colouring to only those exact
+        # positions — other holes sharing the same note name stay plain.
+        pent_positions = set(ordered_path)           # {(hole, row_type), ...}
+        pent_set    = {NOTES[(midi_root + _path_offset(h, r)) % 12]
+                       for h, r in ordered_path}    # still needed for bend lookups
+        orange_set  = custom_utility if custom_utility is not None else set()
+        green_notes = custom_green   if custom_green   is not None else set()
+        groups      = [[(h, r)] for h, r in ordered_path]   # singleton groups
+    elif path_notes is not None:
+        # Extended custom path: spread note set to all octaves on the harp.
+        pent_positions = None                        # colour by note name
         pent_set    = set(path_notes)
         orange_set  = custom_utility if custom_utility is not None else set()
         green_notes = custom_green   if custom_green   is not None else set()
-        path        = pentatonic_path(harp_key, pent_set)
+        groups      = _group_path(pentatonic_path(harp_key, pent_set))
     else:
+        pent_positions = None                        # colour by note name
         _, orange_set, pent_list = pentatonic_info(scale_key, mode)
-        pent_set = set(pent_list)
-        pair = relative_pair(scale_key, mode)
+        pent_set    = set(pent_list)
+        pair        = relative_pair(scale_key, mode)
         green_notes = set(pair) if pair else {scale_key}
-        path = pentatonic_path(harp_key, pent_set)
+        groups      = _group_path(pentatonic_path(harp_key, pent_set))
 
     img = Image.new('RGB', (IMG_W, IMG_H), t['bg'])
     dc  = ImageDraw.Draw(img)
@@ -611,10 +749,40 @@ def render(scale_key, mode, harp_key, dark_bg=True,
     blow_cy = _blow_cy()
     lw = t['outline_lw']
 
-    # Path lines (drawn behind note shapes)
-    # Group consecutive path nodes by pitch offset so duplicate-pitch positions
-    # (e.g. draw-2 and blow-3 both = G on a C harp) produce forked paths.
-    groups = _group_path(path)
+    # ── Pass 1: orange shapes behind everything ───────────────────────────────
+    # Draw orange (utility) note shapes first so the red path lines paint over
+    # them rather than appearing to terminate inside the orange boxes.
+    SUPPRESS_OVER = {1, 2, 7}
+    oy = _over_y()
+
+    for _row, notes_list, cy in [('draw', draw, draw_cy),
+                                   ('blow', blow, blow_cy)]:
+        for i, note in enumerate(notes_list):
+            if note in orange_set:
+                cx = _hole_x(i)
+                _draw_rounded_rect(dc, cx, cy,
+                                   CIRCLE_R * 2 - 4, CIRCLE_R * 2 - 4,
+                                   ORANGE_C, OUTLINE_C, radius=9, lw=lw)
+                _center_text(dc, cx, cy, note, f_note, TEXT_C)
+
+    for i, note in enumerate(ob):
+        if note and i not in SUPPRESS_OVER:
+            _render_bend_note(dc, _hole_x(i), oy, note, pent_set, green_notes,
+                              orange_set, f_tiny, t, rx=OVER_RX, ry=OVER_RY,
+                              orange_only=True)
+
+    for i in range(10):
+        cx = _hole_x(i)
+        for level, note in enumerate(db[i]):
+            _render_bend_note(dc, cx, _bend_between_y(level), note, pent_set,
+                              green_notes, orange_set, f_tiny, t, orange_only=True)
+        for level, note in enumerate(bb[i]):
+            _render_bend_note(dc, cx, _blow_bend_y(level), note, pent_set,
+                              green_notes, orange_set, f_tiny, t, orange_only=True)
+
+    # ── Pass 2: red path lines ────────────────────────────────────────────────
+    # `groups` is already built above: either singleton lists (ordered/riff mode)
+    # or pitch-grouped fork lists (extended mode).
     for i in range(len(groups) - 1):
         for p1 in groups[i]:
             for p2 in groups[i + 1]:
@@ -622,48 +790,46 @@ def render(scale_key, mode, harp_key, dark_bg=True,
                 x2, y2 = _pos_xy(*p2)
                 dc.line([x1, y1, x2, y2], fill=LINE_C, width=4)
 
-    # Note shapes for draw and blow rows
+    # ── Pass 3: all non-orange note shapes on top ─────────────────────────────
     for _row, notes_list, cy in [('draw', draw, draw_cy),
                                    ('blow', blow, blow_cy)]:
         for i, note in enumerate(notes_list):
             cx = _hole_x(i)
-            if note in pent_set:
+            # In ordered mode check exact position; otherwise check by note name.
+            in_path = ((i, _row) in pent_positions) if pent_positions is not None \
+                      else (note in pent_set)
+            if in_path:
                 fill = ROOT_C if note in green_notes else PENT_C
                 _draw_circle(dc, cx, cy, CIRCLE_R, fill, LINE_C, lw=lw)
                 _center_text(dc, cx, cy, note, f_note, TEXT_C)
-            elif note in orange_set:
-                _draw_rounded_rect(dc, cx, cy,
-                                   CIRCLE_R * 2 - 4, CIRCLE_R * 2 - 4,
-                                   ORANGE_C, OUTLINE_C, radius=9, lw=lw)
-                _center_text(dc, cx, cy, note, f_note, TEXT_C)
-            else:
+            elif note not in orange_set:
                 _center_text(dc, cx, cy, note, f_note, t['plain'])
 
-    # Overblow/overdraw labels above the draw row
-    # Holes 2, 3, 8 (0-based 1, 2, 7) are suppressed: draw-2 and blow-3 share a
-    # pitch, so the overblow there is redundant and would confuse the fork paths.
-    SUPPRESS_OVER = {1, 2, 7}
-    oy = _over_y()
     for i, note in enumerate(ob):
         if note and i not in SUPPRESS_OVER:
+            pos = (i, 'over')
+            ps  = ({pos} if pos in pent_positions else set()) \
+                  if pent_positions is not None else None
             _render_bend_note(dc, _hole_x(i), oy, note, pent_set, green_notes,
-                              orange_set, f_tiny, t, rx=OVER_RX, ry=OVER_RY)
+                              orange_set, f_tiny, t, rx=OVER_RX, ry=OVER_RY,
+                              orange_only=False, pent_positions=ps)
 
-    # Draw-bend labels between the rows
     for i in range(10):
         cx = _hole_x(i)
         for level, note in enumerate(db[i]):
-            y = _bend_between_y(level)
-            _render_bend_note(dc, cx, y, note, pent_set, green_notes,
-                              orange_set, f_tiny, t)
-
-    # Blow-bend labels below the blow row
-    for i in range(10):
-        cx = _hole_x(i)
+            pos = (i, ('draw_bend', level))
+            ps  = ({pos} if pos in pent_positions else set()) \
+                  if pent_positions is not None else None
+            _render_bend_note(dc, cx, _bend_between_y(level), note, pent_set,
+                              green_notes, orange_set, f_tiny, t, orange_only=False,
+                              pent_positions=ps)
         for level, note in enumerate(bb[i]):
-            y = _blow_bend_y(level)
-            _render_bend_note(dc, cx, y, note, pent_set, green_notes,
-                              orange_set, f_tiny, t)
+            pos = (i, ('blow_bend', level))
+            ps  = ({pos} if pos in pent_positions else set()) \
+                  if pent_positions is not None else None
+            _render_bend_note(dc, cx, _blow_bend_y(level), note, pent_set,
+                              green_notes, orange_set, f_tiny, t, orange_only=False,
+                              pent_positions=ps)
 
     img = _tight_crop(img, t['bg'])
     return img
@@ -753,6 +919,7 @@ class App(tk.Tk):
         # ── Section 2: Custom Path ────────────────────────────────────────────
 
         self.v_custom         = tk.BooleanVar(value=False)
+        self.v_extend         = tk.BooleanVar(value=True)
         self.v_custom_title   = tk.StringVar()
         self.v_custom_notes   = tk.StringVar()   # Path (red line)
         self.v_custom_utility = tk.StringVar()   # Orange notes
@@ -780,22 +947,31 @@ class App(tk.Tk):
         self._ent_utility = _custom_entry(9,  'Utility:', self.v_custom_utility)
         self._ent_green   = _custom_entry(10, 'Green:',   self.v_custom_green)
 
-        sep(11)
+        self._chk_extend = tk.Checkbutton(
+            ctrl, text='Extend to all octaves', variable=self.v_extend,
+            command=self._refresh, state='disabled',
+            bg='#1e1e1e', fg='#cccccc', selectcolor='#333333',
+            disabledforeground='#555555',
+            activebackground='#1e1e1e', activeforeground='#cccccc',
+            font=('Arial', 10))
+        self._chk_extend.grid(row=11, columnspan=2, sticky='w', pady=(2, 4))
+
+        sep(12)
 
         # ── Section 3: Play-It (mic input) ────────────────────────────────────
 
         tk.Label(ctrl, text='Play-It', bg='#1e1e1e', fg='#cccccc',
                  font=('Arial', 11, 'bold')).grid(
-            row=12, columnspan=2, sticky='w', pady=(0, 4))
+            row=13, columnspan=2, sticky='w', pady=(0, 4))
 
         self.v_playin = tk.StringVar()
         self.v_playin.trace_add('write', lambda *_: self._refresh())
         playin_ent = tk.Entry(ctrl, textvariable=self.v_playin,
                               width=16, font=('Arial', 11))
-        playin_ent.grid(row=13, columnspan=2, sticky='ew', pady=2)
+        playin_ent.grid(row=14, columnspan=2, sticky='ew', pady=2)
 
         rec_frame = tk.Frame(ctrl, bg='#1e1e1e')
-        rec_frame.grid(row=14, columnspan=2, sticky='ew', pady=(4, 0))
+        rec_frame.grid(row=15, columnspan=2, sticky='ew', pady=(4, 0))
         rec_frame.columnconfigure(1, weight=1, minsize=10)
 
         self._btn_record = tk.Button(
@@ -816,12 +992,12 @@ class App(tk.Tk):
                   font=('Arial', 10), padx=4, pady=2).grid(
             row=0, column=3, sticky='e', padx=(8, 0))
 
-        sep(15)
+        sep(16)
 
         self._info = tk.Label(ctrl, text='', bg='#1e1e1e', fg='#888888',
                               font=('Arial', 9), wraplength=200, justify='left',
                               height=3, anchor='nw')
-        self._info.grid(row=16, columnspan=2, sticky='w', pady=(0, 4))
+        self._info.grid(row=17, columnspan=2, sticky='w', pady=(0, 4))
 
     # ── Preview canvas ─────────────────────────────────────────────────────────
 
@@ -942,23 +1118,34 @@ class App(tk.Tk):
         for ent in (self._ent_title, self._ent_notes,
                     self._ent_utility, self._ent_green):
             ent.config(state=state)
+        self._chk_extend.config(state=state)
         self._refresh()
 
     def _custom_params(self):
-        """Return (path_notes, custom_utility, custom_green, custom_title).
-        All are None/empty-set when custom mode is off.
+        """Return (path_notes, custom_utility, custom_green, custom_title, ordered_path).
+
+        When extend=True:  path_notes is set, ordered_path is None.
+        When extend=False: path_notes is None, ordered_path is [(hole,row),...].
+        All are None/empty when custom mode is off.
         Raises ValueError on unparseable note names."""
         if not self.v_custom.get():
-            return None, None, None, None
+            return None, None, None, None, None
         def _parse(raw):
             r = raw.strip()
             return set(parse_note_names(r)) if r else set()
-        raw_path = self.v_custom_notes.get().strip()
-        path_notes    = parse_note_names(raw_path) if raw_path else None
+        raw_path       = self.v_custom_notes.get().strip()
         custom_utility = _parse(self.v_custom_utility.get())
         custom_green   = _parse(self.v_custom_green.get())
         custom_title   = self.v_custom_title.get().strip() or None
-        return path_notes, custom_utility, custom_green, custom_title
+
+        if self.v_extend.get():
+            path_notes = parse_note_names(raw_path) if raw_path else None
+            return path_notes, custom_utility, custom_green, custom_title, None
+        else:
+            ordered = build_ordered_path(
+                parse_path_spec(raw_path), self.v_harp.get()
+            ) if raw_path else None
+            return None, custom_utility, custom_green, custom_title, ordered
 
     # ── Refresh ────────────────────────────────────────────────────────────────
 
@@ -968,16 +1155,17 @@ class App(tk.Tk):
         mode     = self.v_mode.get()
 
         try:
-            path_notes, c_util, c_green, custom_title = self._custom_params()
+            path_notes, c_util, c_green, custom_title, ordered = self._custom_params()
             # Fall back to Play-It notes when Custom Path is off
-            if path_notes is None:
+            if path_notes is None and ordered is None:
                 playin_raw = self.v_playin.get().strip()
                 if playin_raw:
                     path_notes = parse_note_names(playin_raw)
                     c_util, c_green, custom_title = set(), set(), None
             img = render(key, mode, harp_key, dark_bg=self.v_dark.get(),
                          path_notes=path_notes, custom_title=custom_title,
-                         custom_utility=c_util, custom_green=c_green)
+                         custom_utility=c_util, custom_green=c_green,
+                         ordered_path=ordered)
         except ValueError as e:
             self._info.config(text=f"Note error: {e}")
             return
@@ -1021,35 +1209,43 @@ class App(tk.Tk):
         mode     = self.v_mode.get()
 
         try:
-            path_notes, _, _, _ = self._custom_params()
-            if path_notes is None:
+            path_notes, _, _, _, ordered = self._custom_params()
+            if path_notes is None and ordered is None:
                 playin_raw = self.v_playin.get().strip()
                 if playin_raw:
                     path_notes = parse_note_names(playin_raw)
         except ValueError:
             return
 
-        if path_notes is not None:
-            note_set     = set(path_notes)
-            anchor_class = NOTES.index(path_notes[0])
+        midi_root = 60 + NOTES.index(harp_key)
+
+        if ordered is not None:
+            # Ordered / riff mode: play the exact specified positions in sequence.
+            midi_notes = [midi_root + _path_offset(h, r) for h, r in ordered]
+            if not forward:
+                midi_notes = list(reversed(midi_notes))
         else:
-            _, _, pent = pentatonic_info(key, mode)
-            note_set     = set(pent)
-            anchor_class = NOTES.index(key)
+            if path_notes is not None:
+                note_set     = set(path_notes)
+                anchor_class = NOTES.index(path_notes[0])
+            else:
+                _, _, pent = pentatonic_info(key, mode)
+                note_set     = set(pent)
+                anchor_class = NOTES.index(key)
 
-        path = pentatonic_path(harp_key, note_set)
-        if not path:
-            return
+            path = pentatonic_path(harp_key, note_set)
+            if not path:
+                return
 
-        midi_notes = _path_to_midi(path, harp_key)
+            midi_notes = _path_to_midi(path, harp_key)
 
-        # Trim to first octave anchored on the tonic (or first custom note).
-        root_idx = [i for i, m in enumerate(midi_notes) if m % 12 == anchor_class]
-        if len(root_idx) >= 2:
-            midi_notes = midi_notes[root_idx[0]:root_idx[1] + 1]
+            # Trim to first octave anchored on the tonic (or first custom note).
+            root_idx = [i for i, m in enumerate(midi_notes) if m % 12 == anchor_class]
+            if len(root_idx) >= 2:
+                midi_notes = midi_notes[root_idx[0]:root_idx[1] + 1]
 
-        if not forward:
-            midi_notes = list(reversed(midi_notes))
+            if not forward:
+                midi_notes = list(reversed(midi_notes))
 
         note_dur = 60.0 / max(self.v_tempo.get(), 1)
         self._stop_event = threading.Event()
@@ -1070,13 +1266,14 @@ class App(tk.Tk):
     def _current_render(self):
         """Re-render at full resolution with current settings."""
         try:
-            path_notes, c_util, c_green, custom_title = self._custom_params()
+            path_notes, c_util, c_green, custom_title, ordered = self._custom_params()
         except ValueError:
-            path_notes, c_util, c_green, custom_title = None, None, None, None
+            path_notes, c_util, c_green, custom_title, ordered = None, None, None, None, None
         return render(self.v_key.get(), self.v_mode.get(),
                       self.v_harp.get(), dark_bg=self.v_dark.get(),
                       path_notes=path_notes, custom_title=custom_title,
-                      custom_utility=c_util, custom_green=c_green)
+                      custom_utility=c_util, custom_green=c_green,
+                      ordered_path=ordered)
 
     def _copy(self):
         img = self._current_render()
