@@ -49,7 +49,7 @@ elif _platform.system() == 'Windows':
     for _dll_name in ('libfluidsynth-3.dll', 'libfluidsynth.dll', 'fluidsynth.dll'):
         _dll_path = _find_dll(_dll_name)
         if _dll_path:
-            _FLUID_LIBS.append((_dll_path, '.'))
+            _FLUID_LIBS.append(_dll_path)
             break
 
 a = Analysis(
