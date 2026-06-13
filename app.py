@@ -957,26 +957,36 @@ def render(scale_key, mode, harp_key, dark_bg=True,
     return img
 
 def _copy_to_clipboard(img):
-    """Copy a PIL Image to the system clipboard as PNG (macOS / Windows / Linux)."""
+    """Copy a PIL Image to the system clipboard (macOS / Windows / Linux)."""
+    _sys = platform.system()
+    if _sys == 'Windows':
+        # Use Windows API via ctypes — no temp file, no PowerShell, no extra packages.
+        # CF_DIB (format 8) expects DIB data: BMP bytes with the 14-byte file header stripped.
+        import ctypes, io as _io
+        bmp_io = _io.BytesIO()
+        img.convert('RGB').save(bmp_io, format='BMP')
+        dib = bmp_io.getvalue()[14:]
+        ctypes.windll.user32.OpenClipboard(None)
+        ctypes.windll.user32.EmptyClipboard()
+        h = ctypes.windll.kernel32.GlobalAlloc(0x0002, len(dib))  # GMEM_MOVEABLE
+        ptr = ctypes.windll.kernel32.GlobalLock(h)
+        ctypes.memmove(ptr, dib, len(dib))
+        ctypes.windll.kernel32.GlobalUnlock(h)
+        ctypes.windll.user32.SetClipboardData(8, h)               # 8 = CF_DIB
+        ctypes.windll.user32.CloseClipboard()
+        return
+
+    # macOS and Linux need a temp file
     import tempfile
     fd, tmp = tempfile.mkstemp(suffix='.png')
     os.close(fd)
     try:
         img.save(tmp, 'PNG')
-        _sys = platform.system()
         if _sys == 'Darwin':
             subprocess.run(
                 ['osascript', '-e',
                  f'set the clipboard to (read (POSIX file "{tmp}") as «class PNGf»)'],
                 check=True)
-        elif _sys == 'Windows':
-            # PowerShell ships with every modern Windows — no extra dependency needed.
-            ps = (
-                'Add-Type -Assembly System.Windows.Forms,System.Drawing;'
-                f'[System.Windows.Forms.Clipboard]::SetImage('
-                f'[System.Drawing.Image]::FromFile("{tmp}"))'
-            )
-            subprocess.run(['powershell', '-NoProfile', '-Command', ps], check=True)
         else:
             # Linux: try xclip then xsel (user needs one of them installed).
             for cmd in (
