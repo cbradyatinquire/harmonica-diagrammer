@@ -9,25 +9,19 @@ print("=" * 55)
 print("Harmonica Notation — Windows Diagnostics")
 print("=" * 55)
 
-# ── FluidSynth DLL dependencies ───────────────────────────
-print("\n--- FluidSynth DLL dependencies ---")
-import ctypes
-_required_dlls = [
-    'libfluidsynth-3.dll',
-    'libglib-2.0-0.dll',
-    'libgthread-2.0-0.dll',
-    'libgobject-2.0-0.dll',
-    'libintl-8.dll',
-    'libpcre2-8-0.dll',
-    'libffi-8.dll',
-    'libwinpthread-1.dll',
-]
-for dll in _required_dlls:
-    try:
-        ctypes.WinDLL(dll)
-        print(f"  {dll}: OK")
-    except OSError as e:
-        print(f"  {dll}: MISSING — {e}")
+# ── DLLs present in current directory ─────────────────────
+print("\n--- DLLs in current directory ---")
+import ctypes, glob
+_local_dlls = sorted(glob.glob('*.dll') + glob.glob('*.DLL'))
+if _local_dlls:
+    for dll in _local_dlls:
+        try:
+            ctypes.WinDLL(dll)
+            print(f"  {dll}: loads OK")
+        except OSError as e:
+            print(f"  {dll}: load FAILED — {e}")
+else:
+    print("  (none found — DLLs must be on PATH)")
 
 # ── FluidSynth audio drivers ──────────────────────────────
 print("\n--- FluidSynth audio drivers ---")
