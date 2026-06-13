@@ -27,7 +27,7 @@ def _patch_fluidsynth_search():
     elif _sys == 'Windows':
         # Windows one-dir bundle: DLLs sit next to the .exe
         search_dir = exe_dir
-        candidates = ('fluidsynth.dll', 'libfluidsynth.dll', 'libfluidsynth-3.dll')
+        candidates = ('libfluidsynth-3.dll', 'libfluidsynth.dll', 'fluidsynth.dll')
     else:
         # Linux one-dir bundle: .so files next to the executable
         search_dir = exe_dir
