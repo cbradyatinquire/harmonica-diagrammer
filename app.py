@@ -84,13 +84,17 @@ def _init_audio():
     if _sys == 'Darwin':
         _drivers = ['coreaudio']
     elif _sys == 'Windows':
-        _drivers = ['dsound', 'wasapi', 'winmm']
+        _drivers = ['dsound', 'wasapi', 'waveout', 'winmm']
     else:
         _drivers = ['pulseaudio', 'pipewire', 'alsa', 'oss']
     started = False
     for drv in _drivers:
         try:
             _fs.start(driver=drv)
+            # pyfluidsynth doesn't raise when the C driver returns NULL;
+            # check the internal handle to confirm it actually started.
+            if getattr(_fs, '_audio_driver', None) is None:
+                continue
             started = True
             break
         except Exception:
@@ -962,18 +966,36 @@ def _copy_to_clipboard(img):
     if _sys == 'Windows':
         # Use Windows API via ctypes — no temp file, no PowerShell, no extra packages.
         # CF_DIB (format 8) expects DIB data: BMP bytes with the 14-byte file header stripped.
-        import ctypes, io as _io
+        #
+        # IMPORTANT: declare 64-bit-correct return/arg types explicitly.
+        # Without this, ctypes defaults to 32-bit int returns and truncates
+        # 64-bit HGLOBAL pointers to 0x00000000, causing an access violation.
+        import ctypes, ctypes.wintypes, io as _io
+
+        k32 = ctypes.WinDLL('kernel32')
+        k32.GlobalAlloc.restype  = ctypes.c_void_p
+        k32.GlobalAlloc.argtypes = [ctypes.wintypes.UINT, ctypes.c_size_t]
+        k32.GlobalLock.restype   = ctypes.c_void_p
+        k32.GlobalLock.argtypes  = [ctypes.c_void_p]
+        k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+
+        u32 = ctypes.WinDLL('user32')
+        u32.OpenClipboard.argtypes  = [ctypes.c_void_p]
+        u32.SetClipboardData.restype  = ctypes.c_void_p
+        u32.SetClipboardData.argtypes = [ctypes.wintypes.UINT, ctypes.c_void_p]
+
         bmp_io = _io.BytesIO()
         img.convert('RGB').save(bmp_io, format='BMP')
-        dib = bmp_io.getvalue()[14:]
-        ctypes.windll.user32.OpenClipboard(None)
-        ctypes.windll.user32.EmptyClipboard()
-        h = ctypes.windll.kernel32.GlobalAlloc(0x0002, len(dib))  # GMEM_MOVEABLE
-        ptr = ctypes.windll.kernel32.GlobalLock(h)
+        dib = bmp_io.getvalue()[14:]          # strip 14-byte BMP file header → DIB
+
+        u32.OpenClipboard(None)
+        u32.EmptyClipboard()
+        h   = k32.GlobalAlloc(0x0002, len(dib))   # GMEM_MOVEABLE
+        ptr = k32.GlobalLock(h)
         ctypes.memmove(ptr, dib, len(dib))
-        ctypes.windll.kernel32.GlobalUnlock(h)
-        ctypes.windll.user32.SetClipboardData(8, h)               # 8 = CF_DIB
-        ctypes.windll.user32.CloseClipboard()
+        k32.GlobalUnlock(h)
+        u32.SetClipboardData(8, h)                 # 8 = CF_DIB
+        u32.CloseClipboard()
         return
 
     # macOS and Linux need a temp file

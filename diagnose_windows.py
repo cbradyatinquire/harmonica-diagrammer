@@ -23,10 +23,15 @@ if not os.path.exists(sf2):
     print(f"WARNING: {sf2} not found in current directory — skipping playback test")
     sf2 = None
 
-for drv in ('dsound', 'wasapi', 'winmm'):
+for drv in ('dsound', 'wasapi', 'waveout', 'winmm'):
     try:
         fs = fluidsynth.Synth(gain=0.8)
         fs.start(driver=drv)
+        # Check the internal handle — pyfluidsynth doesn't raise on NULL driver
+        if getattr(fs, '_audio_driver', None) is None:
+            print(f"  {drv}: started without error but driver handle is NULL (silent fail)")
+            fs.delete()
+            continue
         if sf2:
             sfid = fs.sfload(sf2)
             fs.program_select(0, sfid, 0, 0)
@@ -36,7 +41,7 @@ for drv in ('dsound', 'wasapi', 'winmm'):
             time.sleep(0.1)
             print(f"  {drv}: OK  (you should have heard a note)")
         else:
-            print(f"  {drv}: driver started OK (no SF2 to play)")
+            print(f"  {drv}: driver handle valid (no SF2 to play)")
         fs.delete()
     except Exception as e:
         print(f"  {drv}: FAILED — {e}")
