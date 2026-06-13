@@ -2,6 +2,7 @@
 """Harmonica Pentatonic Notation Editor — Phase 1"""
 
 import os
+import platform
 import sys
 
 # ── Bundled-library bootstrap ──────────────────────────────────────────────────
@@ -60,7 +61,6 @@ import threading
 import time
 import queue
 import subprocess
-import platform
 import numpy as np
 import sounddevice as sd
 import fluidsynth
