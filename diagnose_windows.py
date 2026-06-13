@@ -9,19 +9,39 @@ print("=" * 55)
 print("Harmonica Notation — Windows Diagnostics")
 print("=" * 55)
 
-# ── DLLs present in current directory ─────────────────────
+# ── Architecture + DLLs in current directory ──────────────
+print("\n--- Architecture ---")
+import ctypes, os, struct
+print(f"  Python: {struct.calcsize('P')*8}-bit")
+
+def _dll_bits(path):
+    """Return 32 or 64 for a PE DLL, or None if unreadable."""
+    try:
+        with open(path, 'rb') as f:
+            if f.read(2) != b'MZ':
+                return None
+            f.seek(60); pe_offset = struct.unpack('<I', f.read(4))[0]
+            f.seek(pe_offset + 4)
+            machine = struct.unpack('<H', f.read(2))[0]
+            return 64 if machine == 0x8664 else 32
+    except Exception:
+        return None
+
 print("\n--- DLLs in current directory ---")
-import ctypes, glob
-_local_dlls = sorted(glob.glob('*.dll') + glob.glob('*.DLL'))
+# Use os.listdir to avoid case-insensitive duplicate matches on Windows
+_local_dlls = sorted(
+    f for f in os.listdir('.') if f.lower().endswith('.dll'))
 if _local_dlls:
     for dll in _local_dlls:
+        bits = _dll_bits(dll)
+        bits_str = f"{bits}-bit" if bits else "?"
         try:
-            ctypes.WinDLL(dll)
-            print(f"  {dll}: loads OK")
+            ctypes.WinDLL(os.path.abspath(dll))
+            print(f"  {dll} ({bits_str}): loads OK")
         except OSError as e:
-            print(f"  {dll}: load FAILED — {e}")
+            print(f"  {dll} ({bits_str}): FAILED — {e}")
 else:
-    print("  (none found — DLLs must be on PATH)")
+    print("  (none — DLLs must be on PATH)")
 
 # ── FluidSynth audio drivers ──────────────────────────────
 print("\n--- FluidSynth audio drivers ---")
