@@ -988,10 +988,17 @@ def _copy_to_clipboard(img):
         img.convert('RGB').save(bmp_io, format='BMP')
         dib = bmp_io.getvalue()[14:]          # strip 14-byte BMP file header → DIB
 
-        u32.OpenClipboard(None)
+        if not u32.OpenClipboard(None):
+            raise RuntimeError("OpenClipboard failed — clipboard may be locked by another app")
         u32.EmptyClipboard()
-        h   = k32.GlobalAlloc(0x0002, len(dib))   # GMEM_MOVEABLE
+        h = k32.GlobalAlloc(0x0002, len(dib))      # GMEM_MOVEABLE
+        if h is None:
+            u32.CloseClipboard()
+            raise RuntimeError("GlobalAlloc failed")
         ptr = k32.GlobalLock(h)
+        if ptr is None:
+            u32.CloseClipboard()
+            raise RuntimeError("GlobalLock failed")
         ctypes.memmove(ptr, dib, len(dib))
         k32.GlobalUnlock(h)
         u32.SetClipboardData(8, h)                 # 8 = CF_DIB
