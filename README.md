@@ -19,8 +19,16 @@ pip install -r requirements.txt
 ```
 
 #### Windows
+
+The easiest way to get FluidSynth and all its dependencies is via **conda**:
 ```bash
-winget install FluidSynth.FluidSynth   # or download the DLL from fluidsynth.org
+conda install -c conda-forge fluidsynth
+pip install -r requirements.txt
+```
+
+If you don't use conda, download `libfluidsynth-3.dll` (cpp11 build) from the [FluidSynth GitHub releases](https://github.com/FluidSynth/fluidsynth/releases) and place it in the project folder. You will also need the MinGW runtime DLLs (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`) — these can be obtained from a [WinLibs standalone GCC package](https://winlibs.com/) (extract the zip and copy those three files from `mingw64\bin\` into the project folder).
+
+```bash
 pip install -r requirements.txt
 ```
 

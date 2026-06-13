@@ -27,6 +27,23 @@ def _dll_bits(path):
     except Exception:
         return None
 
+print("\n--- MinGW / MSVC runtime DLLs (FluidSynth dependencies) ---")
+_runtime_dlls = [
+    # MinGW C++ runtime (needed by MinGW-compiled FluidSynth)
+    'libgcc_s_seh-1.dll',
+    'libstdc++-6.dll',
+    'libwinpthread-1.dll',
+    # MSVC runtime (needed by MSVC-compiled FluidSynth)
+    'VCRUNTIME140.dll',
+    'MSVCP140.dll',
+]
+for dll in _runtime_dlls:
+    try:
+        ctypes.WinDLL(dll)
+        print(f"  {dll}: found OK")
+    except OSError:
+        print(f"  {dll}: NOT FOUND")
+
 print("\n--- DLLs in current directory ---")
 # Use os.listdir to avoid case-insensitive duplicate matches on Windows
 _local_dlls = sorted(
@@ -62,7 +79,7 @@ for drv in ('dsound', 'wasapi', 'waveout', 'winmm'):
         fs = fluidsynth.Synth(gain=0.8)
         fs.start(driver=drv)
         # Check the internal handle — pyfluidsynth doesn't raise on NULL driver
-        if getattr(fs, '_audio_driver', None) is None:
+        if not getattr(fs, 'audio_driver', None):
             print(f"  {drv}: started without error but driver handle is NULL (silent fail)")
             fs.delete()
             continue
@@ -102,20 +119,31 @@ except Exception as e:
 # ── clipboard ─────────────────────────────────────────────
 print("\n--- Clipboard (ctypes / CF_DIB) ---")
 try:
-    import ctypes, io
+    import ctypes, ctypes.wintypes, io
     from PIL import Image
+    # Explicit 64-bit-safe declarations (avoids pointer truncation on 64-bit Python)
+    k32 = ctypes.WinDLL('kernel32')
+    k32.GlobalAlloc.restype  = ctypes.c_void_p
+    k32.GlobalAlloc.argtypes = [ctypes.wintypes.UINT, ctypes.c_size_t]
+    k32.GlobalLock.restype   = ctypes.c_void_p
+    k32.GlobalLock.argtypes  = [ctypes.c_void_p]
+    k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    u32 = ctypes.WinDLL('user32')
+    u32.OpenClipboard.argtypes  = [ctypes.c_void_p]
+    u32.SetClipboardData.restype  = ctypes.c_void_p
+    u32.SetClipboardData.argtypes = [ctypes.wintypes.UINT, ctypes.c_void_p]
     img = Image.new('RGB', (200, 100), color=(255, 210, 0))
     bmp_io = io.BytesIO()
     img.convert('RGB').save(bmp_io, format='BMP')
     dib = bmp_io.getvalue()[14:]
-    ctypes.windll.user32.OpenClipboard(None)
-    ctypes.windll.user32.EmptyClipboard()
-    h = ctypes.windll.kernel32.GlobalAlloc(0x0002, len(dib))
-    ptr = ctypes.windll.kernel32.GlobalLock(h)
+    u32.OpenClipboard(None)
+    u32.EmptyClipboard()
+    h = k32.GlobalAlloc(0x0002, len(dib))
+    ptr = k32.GlobalLock(h)
     ctypes.memmove(ptr, dib, len(dib))
-    ctypes.windll.kernel32.GlobalUnlock(h)
-    ctypes.windll.user32.SetClipboardData(8, h)
-    ctypes.windll.user32.CloseClipboard()
+    k32.GlobalUnlock(h)
+    u32.SetClipboardData(8, h)
+    u32.CloseClipboard()
     print("  OK — try pasting into Paint or Word to verify")
 except Exception as e:
     print(f"  FAILED — {e}")

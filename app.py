@@ -84,7 +84,7 @@ def _init_audio():
     if _sys == 'Darwin':
         _drivers = ['coreaudio']
     elif _sys == 'Windows':
-        _drivers = ['dsound', 'wasapi', 'waveout', 'winmm']
+        _drivers = ['wasapi', 'dsound', 'waveout', 'winmm']
     else:
         _drivers = ['pulseaudio', 'pipewire', 'alsa', 'oss']
     started = False
@@ -93,7 +93,7 @@ def _init_audio():
             _fs.start(driver=drv)
             # pyfluidsynth doesn't raise when the C driver returns NULL;
             # check the internal handle to confirm it actually started.
-            if getattr(_fs, '_audio_driver', None) is None:
+            if not getattr(_fs, 'audio_driver', None):
                 continue
             started = True
             break
