@@ -10,20 +10,38 @@ import sys
 # which only searches system paths and returns None inside the bundle.
 # We patch find_library before the import so it hands back the bundled path.
 def _patch_fluidsynth_search():
+    """When running as a PyInstaller bundle, point ctypes at the bundled FluidSynth
+    library regardless of OS.  In a dev environment this is a no-op."""
     if not getattr(sys, 'frozen', False):
-        return   # dev environment: rely on Homebrew install as normal
-    exe_dir    = os.path.dirname(sys.executable)          # .app/Contents/MacOS/
-    frameworks = os.path.normpath(os.path.join(exe_dir, '..', 'Frameworks'))
-    bundled    = None
-    for name in ('libfluidsynth.3.5.3.dylib',
-                 'libfluidsynth.3.dylib',
-                 'libfluidsynth.dylib'):
-        candidate = os.path.join(frameworks, name)
-        if os.path.exists(candidate):
-            bundled = candidate
+        return
+
+    _sys  = platform.system()
+    exe_dir = os.path.dirname(sys.executable)
+
+    if _sys == 'Darwin':
+        # macOS .app: dylibs land in Contents/Frameworks/
+        search_dir = os.path.normpath(os.path.join(exe_dir, '..', 'Frameworks'))
+        candidates = ('libfluidsynth.3.5.3.dylib',
+                      'libfluidsynth.3.dylib',
+                      'libfluidsynth.dylib')
+    elif _sys == 'Windows':
+        # Windows one-dir bundle: DLLs sit next to the .exe
+        search_dir = exe_dir
+        candidates = ('fluidsynth.dll', 'libfluidsynth.dll', 'libfluidsynth-3.dll')
+    else:
+        # Linux one-dir bundle: .so files next to the executable
+        search_dir = exe_dir
+        candidates = ('libfluidsynth.so.3', 'libfluidsynth.so.2', 'libfluidsynth.so')
+
+    bundled = None
+    for name in candidates:
+        path = os.path.join(search_dir, name)
+        if os.path.exists(path):
+            bundled = path
             break
     if bundled is None:
-        return   # nothing to patch — will fail naturally with a clear error
+        return   # not found — FluidSynth will raise its own clear error
+
     import ctypes.util
     _orig = ctypes.util.find_library
     def _patched(name):
@@ -42,6 +60,7 @@ import threading
 import time
 import queue
 import subprocess
+import platform
 import numpy as np
 import sounddevice as sd
 import fluidsynth
@@ -60,7 +79,24 @@ _sfid = None
 
 def _init_audio():
     global _sfid
-    _fs.start(driver='coreaudio')
+    # Try platform-preferred drivers in order; fall back to FluidSynth auto-detect.
+    _sys = platform.system()
+    if _sys == 'Darwin':
+        _drivers = ['coreaudio']
+    elif _sys == 'Windows':
+        _drivers = ['dsound', 'wasapi', 'winmm']
+    else:
+        _drivers = ['pulseaudio', 'pipewire', 'alsa', 'oss']
+    started = False
+    for drv in _drivers:
+        try:
+            _fs.start(driver=drv)
+            started = True
+            break
+        except Exception:
+            continue
+    if not started:
+        _fs.start()   # let FluidSynth pick
     _sfid = _fs.sfload(_SF2)
     _fs.program_select(0, _sfid, 0, 0)
 
@@ -130,18 +166,76 @@ def _freq_to_note_name(freq):
     return NOTES[round(midi) % 12]
 
 
+def _freq_to_midi_int(freq):
+    """Convert a raw frequency (Hz) to the nearest integer MIDI note number."""
+    if freq is None or freq <= 0:
+        return None
+    return round(69.0 + 12.0 * np.log2(freq / 440.0))
+
+
+def _harp_midi_root(harp_key):
+    """MIDI note of hole-1 blow for a standard 10-hole diatonic harmonica.
+
+    C harp → C4 (MIDI 60).  Harps G–B sit a perfect-fourth-or-more above C
+    in the chromatic scale, so their physical root lives in octave 3:
+        G3=55, Ab3=56, A3=57, Bb3=58, B3=59
+    Harps C–Gb sit in octave 4:
+        C4=60, Db4=61, D4=62, Eb4=63, E4=64, F4=65, Gb4=66
+    """
+    midi = 60 + NOTES.index(harp_key)
+    if midi > 66:   # G4 and above → drop one octave
+        midi -= 12
+    return midi
+
+
+def _midi_to_harp_positions(midi, harp_root):
+    """Return every harp position whose pitch matches the given MIDI note number.
+
+    Searches blow, draw, all bends, and non-suppressed overblows/overdraws.
+    Returns [(hole_idx, row_type), ...]; empty when the note is out of harp range.
+    NOTES and pitch helpers are defined further down; this function is only called
+    at runtime (inside the App), so forward references are fine.
+    """
+    midi_root = _harp_midi_root(harp_root)
+    target    = midi - midi_root        # semitone offset from harp root
+    ob        = over_notes(harp_root)
+    SUPPRESS_OVER = {1, 2, 7}
+    positions = []
+    for i in range(10):
+        b, d = BLOW_OFF[i], DRAW_OFF[i]
+        if b == target:
+            positions.append((i, 'blow'))
+        if d == target:
+            positions.append((i, 'draw'))
+        if d > b:           # draw bends
+            for j in range(1, d - b):
+                if d - j == target:
+                    positions.append((i, ('draw_bend', j - 1)))
+        if b > d:           # blow bends
+            for j in range(1, b - d):
+                if b - j == target:
+                    positions.append((i, ('blow_bend', j - 1)))
+        if i not in SUPPRESS_OVER and ob[i]:
+            over_off = (d + 1) if d > b else (b + 1)
+            if over_off == target:
+                positions.append((i, 'over'))
+    return positions
+
+
 class NoteCapture:
     """Listens to the microphone and emits stable note events via a Queue."""
 
     def __init__(self):
         self._q            = queue.Queue()
         self._current_note = None
+        self._current_freq = None   # raw Hz of the most-recent chunk
         self._held_secs    = 0.0
         self._last_emitted = None
         self._stream       = None
 
     def start(self):
         self._current_note = None
+        self._current_freq = None
         self._held_secs    = 0.0
         self._last_emitted = None
         self._stream = sd.InputStream(
@@ -170,8 +264,18 @@ class NoteCapture:
     def current_note(self):
         return self._current_note
 
+    @property
+    def current_freq(self):
+        """Raw frequency (Hz) of the most-recently processed audio chunk, or None."""
+        return self._current_freq
+
+    @property
+    def is_running(self):
+        return self._stream is not None
+
     def _callback(self, indata, frames, time_info, status):
         freq, _ = _autocorr_pitch(indata[:, 0])
+        self._current_freq = freq
         note     = _freq_to_note_name(freq)
         chunk_s  = frames / _CAPTURE_SR
 
@@ -340,9 +444,8 @@ def _group_path(path):
 
 
 def _path_to_midi(path, harp_root):
-    """Return one MIDI note per pitch group in the path (deduplicates fork positions).
-    C harp root = C4 = MIDI 60."""
-    midi_root = 60 + NOTES.index(harp_root)
+    """Return one MIDI note per pitch group in the path (deduplicates fork positions)."""
+    midi_root = _harp_midi_root(harp_root)
     return [midi_root + _path_offset(*group[0]) for group in _group_path(path)]
 
 
@@ -550,28 +653,47 @@ def _hole_x(i):
 
 
 def _load_font(size, bold=False):
-    candidates = []
     if bold:
         candidates = [
+            # macOS
             '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
             '/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf',
             '/System/Library/Fonts/Supplemental/Verdana Bold.ttf',
+            # Windows
+            r'C:\Windows\Fonts\arialbd.ttf',
+            r'C:\Windows\Fonts\verdanab.ttf',
+            r'C:\Windows\Fonts\trebucbd.ttf',
+            # Linux (MS core fonts, Liberation, DejaVu)
+            '/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+            '/usr/share/fonts/liberation/LiberationSans-Bold.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+            '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
         ]
     else:
         candidates = [
+            # macOS
             '/System/Library/Fonts/Supplemental/Arial.ttf',
             '/System/Library/Fonts/Supplemental/Verdana.ttf',
             '/System/Library/Fonts/Supplemental/Trebuchet MS.ttf',
+            # Windows
+            r'C:\Windows\Fonts\arial.ttf',
+            r'C:\Windows\Fonts\verdana.ttf',
+            r'C:\Windows\Fonts\trebuc.ttf',
+            # Linux
+            '/usr/share/fonts/truetype/msttcorefonts/Arial.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+            '/usr/share/fonts/liberation/LiberationSans-Regular.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/dejavu/DejaVuSans.ttf',
         ]
+    # Final fallbacks
+    candidates += [
+        '/System/Library/Fonts/Helvetica.ttc',
+        '/Library/Fonts/Arial Unicode.ttf',
+        r'C:\Windows\Fonts\calibri.ttf',
+    ]
     for p in candidates:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                pass
-    # Fallback to any system font
-    for p in ['/System/Library/Fonts/Helvetica.ttc',
-              '/Library/Fonts/Arial Unicode.ttf']:
         if os.path.exists(p):
             try:
                 return ImageFont.truetype(p, size)
@@ -705,7 +827,7 @@ def render(scale_key, mode, harp_key, dark_bg=True,
     bb = blow_bends(harp_key)
     ob = over_notes(harp_key)
 
-    midi_root = 60 + NOTES.index(harp_key)
+    midi_root = _harp_midi_root(harp_key)
 
     if ordered_path is not None:
         # Riff / ordered mode: exact positions in sequence, no fork-spreading.
@@ -835,16 +957,39 @@ def render(scale_key, mode, harp_key, dark_bg=True,
     return img
 
 def _copy_to_clipboard(img):
-    """Copy a PIL Image to the macOS clipboard as PNG via osascript."""
+    """Copy a PIL Image to the system clipboard as PNG (macOS / Windows / Linux)."""
     import tempfile
     fd, tmp = tempfile.mkstemp(suffix='.png')
     os.close(fd)
     try:
         img.save(tmp, 'PNG')
-        subprocess.run(
-            ['osascript', '-e',
-             f'set the clipboard to (read (POSIX file "{tmp}") as «class PNGf»)'],
-            check=True)
+        _sys = platform.system()
+        if _sys == 'Darwin':
+            subprocess.run(
+                ['osascript', '-e',
+                 f'set the clipboard to (read (POSIX file "{tmp}") as «class PNGf»)'],
+                check=True)
+        elif _sys == 'Windows':
+            # PowerShell ships with every modern Windows — no extra dependency needed.
+            ps = (
+                'Add-Type -Assembly System.Windows.Forms,System.Drawing;'
+                f'[System.Windows.Forms.Clipboard]::SetImage('
+                f'[System.Drawing.Image]::FromFile("{tmp}"))'
+            )
+            subprocess.run(['powershell', '-NoProfile', '-Command', ps], check=True)
+        else:
+            # Linux: try xclip then xsel (user needs one of them installed).
+            for cmd in (
+                ['xclip', '-selection', 'clipboard', '-t', 'image/png', '-i', tmp],
+                ['xsel',  '--clipboard', '--input', '--', tmp],
+            ):
+                try:
+                    subprocess.run(cmd, check=True)
+                    return
+                except (FileNotFoundError, subprocess.CalledProcessError):
+                    continue
+            raise RuntimeError(
+                'Install xclip or xsel to enable clipboard copy on Linux.')
     finally:
         os.unlink(tmp)
 
@@ -864,8 +1009,10 @@ class App(tk.Tk):
         self._play_thread = None
         self._capture     = NoteCapture()
         self._recording   = False
+        self._listening   = False
 
         self._build_controls()
+        self._build_listen()
         self._build_preview()
         self._build_output()
         self._refresh()
@@ -874,7 +1021,7 @@ class App(tk.Tk):
 
     def _build_controls(self):
         ctrl = tk.Frame(self, bg='#1e1e1e', padx=12, pady=10)
-        ctrl.grid(row=0, column=0, sticky='nsw')
+        ctrl.grid(row=0, column=0, rowspan=3, sticky='nsw')
 
         lbl_opts  = dict(bg='#1e1e1e', fg='#cccccc', font=('Arial', 11))
         btn_style = dict(font=('Arial', 11), padx=8, pady=4)
@@ -1009,14 +1156,14 @@ class App(tk.Tk):
         ph = int(_init_h * PREVIEW_SCALE)
         self._canvas = tk.Canvas(self, width=pw, height=ph,
                                   bg='black', highlightthickness=0)
-        self._canvas.grid(row=0, column=1, padx=(0, 12), pady=(12, 4))
+        self._canvas.grid(row=1, column=1, padx=(0, 12), pady=(4, 4))
         self._tk_img = None
 
     # ── Output strip (below canvas) ────────────────────────────────────────────
 
     def _build_output(self):
         out = tk.Frame(self, bg='#1e1e1e', padx=8, pady=6)
-        out.grid(row=1, column=1, sticky='ew', padx=(0, 12), pady=(0, 10))
+        out.grid(row=2, column=1, sticky='ew', padx=(0, 12), pady=(0, 10))
 
         btn = dict(font=('Arial', 11), padx=8, pady=4)
 
@@ -1051,12 +1198,15 @@ class App(tk.Tk):
     def _start_record(self):
         self._recording = True
         self._btn_record.config(text='⏹ Stop', fg='red')
-        self._capture.start()
+        if not self._capture.is_running:
+            self._capture.start()
         self._poll_capture()
 
     def _stop_record(self):
         self._recording = False
-        self._capture.stop()
+        # Only stop the stream if Listen is not also using it
+        if not self._listening and self._capture.is_running:
+            self._capture.stop()
         self._btn_record.config(text='🎤 Record', fg='#cccccc')
         self._lbl_hearing.config(text='')
 
@@ -1076,6 +1226,80 @@ class App(tk.Tk):
             self.v_playin.set(' '.join(filter(None, [existing] + new_notes)))
 
         self.after(60, self._poll_capture)
+
+    # ── Listen mode (real-time mic → canvas highlight) ─────────────────────────
+
+    def _build_listen(self):
+        """Create the Listen toggle bar that sits above the canvas (row=0, col=1)."""
+        bar = tk.Frame(self, bg='#1e1e1e', pady=6)
+        bar.grid(row=0, column=1, sticky='ew', padx=(0, 12), pady=(6, 0))
+
+        # Inner frame packed with expand=True so it sits in the horizontal centre
+        inner = tk.Frame(bar, bg='#1e1e1e')
+        inner.pack(expand=True)
+
+        self._btn_listen = tk.Button(
+            inner, text='👂 Listen', command=self._toggle_listen,
+            font=('Arial', 11), padx=8, pady=4)
+        self._btn_listen.pack(side='left')
+
+        self._lbl_listen_note = tk.Label(
+            inner, text='', bg='#1e1e1e', fg='#00ccff',
+            font=('Arial', 13, 'bold'), width=4)
+        self._lbl_listen_note.pack(side='left', padx=(10, 0))
+
+    def _toggle_listen(self):
+        if self._listening:
+            self._stop_listen()
+        else:
+            self._start_listen()
+
+    def _start_listen(self):
+        self._listening = True
+        self._btn_listen.config(text='👂 Listening…', fg='#00aaff')
+        if not self._capture.is_running:
+            self._capture.start()
+        self._poll_listen()
+
+    def _stop_listen(self):
+        self._listening = False
+        self._btn_listen.config(text='👂 Listen', fg='black')
+        self._lbl_listen_note.config(text='')
+        self._canvas.delete('listen_hl')
+        if not self._recording and self._capture.is_running:
+            self._capture.stop()
+
+    def _poll_listen(self):
+        """Called every 60 ms while listening; draws highlight rings on the canvas."""
+        if not self._listening:
+            return
+
+        self._canvas.delete('listen_hl')
+        freq = self._capture.current_freq
+        midi = _freq_to_midi_int(freq)
+
+        if midi is not None:
+            note_name = NOTES[midi % 12]
+            octave    = midi // 12 - 1        # MIDI 60 = C4 → octave 4
+            self._lbl_listen_note.config(text=f'{note_name}{octave}')
+
+            harp_key  = self.v_harp.get()
+            positions = _midi_to_harp_positions(midi, harp_key)
+
+            for hole, row_type in positions:
+                img_x, img_y = _pos_xy(hole, row_type)
+                # Map full-image coords → cropped-image coords → canvas coords
+                cx = (img_x - EXPORT_LEFT) * PREVIEW_SCALE
+                cy = img_y * PREVIEW_SCALE
+                # Ring radius: a little larger than the biggest note shape
+                r  = (CIRCLE_R + 6) * PREVIEW_SCALE
+                self._canvas.create_oval(
+                    cx - r, cy - r, cx + r, cy + r,
+                    outline='#00ccff', width=3, tags='listen_hl')
+        else:
+            self._lbl_listen_note.config(text='')
+
+        self.after(60, self._poll_listen)
 
     # ── Push Play-It → Custom Path ────────────────────────────────────────────
 
@@ -1217,7 +1441,7 @@ class App(tk.Tk):
         except ValueError:
             return
 
-        midi_root = 60 + NOTES.index(harp_key)
+        midi_root = _harp_midi_root(harp_key)
 
         if ordered is not None:
             # Ordered / riff mode: play the exact specified positions in sequence.
@@ -1299,5 +1523,6 @@ class App(tk.Tk):
 
 if __name__ == '__main__':
     app = App()
-    app.protocol('WM_DELETE_WINDOW', lambda: (app._stop_record(), app.destroy()))
+    app.protocol('WM_DELETE_WINDOW',
+                 lambda: (app._stop_record(), app._stop_listen(), app.destroy()))
     app.mainloop()
