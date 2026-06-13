@@ -31,7 +31,7 @@ elif _platform.system() == 'Windows':
         # shutil.which won't find .dll files on Windows (not in PATHEXT).
         # Check: project dir, PATH directories, conda env.
         _search_dirs = [
-            _os.path.dirname(_os.path.abspath(__file__)),  # project directory
+            SPECPATH,        # directory containing the spec file (PyInstaller built-in)
             _os.getcwd(),
         ] + [_d.strip() for _d in _os.environ.get('PATH', '').split(';')]
         _conda = _os.environ.get('CONDA_PREFIX', '')
