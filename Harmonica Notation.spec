@@ -1,11 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 import platform as _platform
 
-# ── macOS: bundle every Homebrew dylib that libfluidsynth depends on.
-# Homebrew installs to non-standard paths that PyInstaller's scanner misses,
-# so we list them explicitly.
-# Windows / Linux: FluidSynth and its deps are installed system-wide and are
-# picked up automatically by PyInstaller's binary analysis — no explicit list needed.
+# ── Bundle FluidSynth and its dependencies for each platform.
+# PyInstaller doesn't trace ctypes.util.find_library() calls, so we locate
+# the FluidSynth library explicitly and add it to binaries.  PyInstaller then
+# analyses that binary and pulls in its transitive dependencies automatically.
 
 _FLUID_LIBS = []
 if _platform.system() == 'Darwin':
@@ -26,6 +25,32 @@ if _platform.system() == 'Darwin':
         '/opt/homebrew/Cellar/portaudio/19.7.0/lib/libportaudio.2.dylib',
         '/opt/homebrew/Cellar/readline/8.3.3/lib/libreadline.8.3.dylib',
     ]
+elif _platform.system() == 'Windows':
+    import os as _os
+    def _find_dll(dll_name):
+        # shutil.which won't find .dll files on Windows (not in PATHEXT).
+        # Check: project dir, PATH directories, conda env.
+        _search_dirs = [
+            _os.path.dirname(_os.path.abspath(__file__)),  # project directory
+            _os.getcwd(),
+        ] + [_d.strip() for _d in _os.environ.get('PATH', '').split(';')]
+        _conda = _os.environ.get('CONDA_PREFIX', '')
+        if _conda:
+            _search_dirs.append(_os.path.join(_conda, 'Library', 'bin'))
+        for _dir in _search_dirs:
+            if not _dir:
+                continue
+            _p = _os.path.join(_dir, dll_name)
+            if _os.path.isfile(_p):
+                return _p
+        return None
+    # Find FluidSynth DLL. PyInstaller will analyse it and pull in its
+    # transitive dependencies (MinGW runtime, libsndfile, etc.) automatically.
+    for _dll_name in ('libfluidsynth-3.dll', 'libfluidsynth.dll', 'fluidsynth.dll'):
+        _dll_path = _find_dll(_dll_name)
+        if _dll_path:
+            _FLUID_LIBS.append((_dll_path, '.'))
+            break
 
 a = Analysis(
     ['app.py'],
